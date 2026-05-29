@@ -98,7 +98,8 @@ body{height:100%;font-family:'DM Sans',sans-serif;overflow:hidden;transition:bac
 .name-input-wrap{
   display:flex;flex-direction:column;gap:8px;
 }
-.name-input-wrap label{font-size:.8rem;color:var(--text3);letter-spacing:.04em;text-transform:uppercase}
+.name-input-wrap label,.pass-input-wrap label{font-size:.8rem;color:var(--text3);letter-spacing:.04em;text-transform:uppercase}
+.pass-input-wrap{margin-top:8px;display:flex;flex-direction:column;gap:8px}
 .name-input{
   background:var(--bg3);border:1px solid var(--border);
   color:var(--text);font-family:'DM Sans',sans-serif;
@@ -561,6 +562,11 @@ video.bubble-media{max-height:200px}
       <label>Who are you?</label>
       <input class="name-input" id="name-input" type="text" placeholder="Your name…" maxlength="24" autocomplete="off" spellcheck="false">
     </div>
+    <div class="pass-input-wrap">
+      <label>Passphrase</label>
+      <input class="name-input" id="pass-input" type="password" placeholder="A secret word…" maxlength="64" autocomplete="off" spellcheck="false">
+    </div>
+    <p class="onboard-sub" style="margin:0;font-size:.78rem">Share this word with your friend. You both need the same one.</p>
     <button class="enter-btn" id="enter-btn">Enter the chat →</button>
   </div>
 </div>
@@ -671,14 +677,14 @@ video.bubble-media{max-height:200px}
 /* ═══════════════════════════════════════════════════════════════
    CONFIGURATION — edit these two values and share the file
 ═══════════════════════════════════════════════════════════════ */
-const PEER_A_ID = 'justus-alice-7f3k9';   // Person A's peer ID
-const PEER_B_ID = 'justus-bob-8m2p4';     // Person B's peer ID
-const PEER_A_NAME_HINT = 'the first person to set up'; // shown in onboarding
-const PEER_B_NAME_HINT = 'the second person to set up';
-
-// Max messages before decay kicks in
 const MAX_MESSAGES = 800;
 const DECAY_TARGET  = 600;
+
+async function hashPassphrase(p){
+  const enc=new TextEncoder().encode(p.toLowerCase().trim());
+  const buf=await crypto.subtle.digest('SHA-256',enc);
+  return Array.from(new Uint8Array(buf)).slice(0,8).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
 
 /* ═══════════════════════════════════════════════════════════════
    DB
@@ -751,10 +757,13 @@ let lastSentTyping=0;
 ═══════════════════════════════════════════════════════════════ */
 (async()=>{
   db=await openDB();
-  // load saved name/id
-  const saved=await dbGet('meta','myId');
+  const saved=await dbGet('meta','slot');
   if(saved){
-    myId=saved.v;myName=(await dbGet('meta','myName')).v;
+    const slot=saved.v;
+    const passHash=(await dbGet('meta','passHash')).v;
+    myId=passHash+'-'+slot;
+    peerId=passHash+'-'+(1-slot);
+    myName=(await dbGet('meta','myName')).v;
     launchApp();
   } else {
     document.getElementById('onboard').style.display='flex';
@@ -763,29 +772,26 @@ let lastSentTyping=0;
 
 document.getElementById('enter-btn').addEventListener('click',startOnboard);
 document.getElementById('name-input').addEventListener('keydown',e=>{if(e.key==='Enter')startOnboard()});
+document.getElementById('pass-input').addEventListener('keydown',e=>{if(e.key==='Enter')startOnboard()});
 
 async function startOnboard(){
   const n=document.getElementById('name-input').value.trim();
-  if(!n)return;
+  const p=document.getElementById('pass-input').value.trim();
+  if(!n||!p)return;
   myName=n;
-  // Assign peer IDs: first person = A, second = B (determined by which slot is free)
-  // Simple: person checks which ID is stored; if none, picks A if unclaimed else B
-  // We use a timestamp-based approach: first to save gets A
+  const passHash=await hashPassphrase(p);
   const existing=await dbGet('meta','slotClaimed');
-  if(!existing){
-    myId=PEER_A_ID;peerId=PEER_B_ID;
-    await dbPut('meta',{k:'slotClaimed',v:Date.now()});
-  } else {
-    myId=PEER_B_ID;peerId=PEER_A_ID;
-  }
-  await dbPut('meta',{k:'myId',v:myId});
+  const slot=existing?1:0;
+  myId=passHash+'-'+slot;
+  peerId=passHash+'-'+(1-slot);
+  if(!existing) await dbPut('meta',{k:'slotClaimed',v:Date.now()});
+  await dbPut('meta',{k:'slot',v:slot});
+  await dbPut('meta',{k:'passHash',v:passHash});
   await dbPut('meta',{k:'myName',v:myName});
   launchApp();
 }
 
 async function launchApp(){
-  // determine peer
-  if(myId===PEER_A_ID){peerId=PEER_B_ID;}else{peerId=PEER_A_ID;}
   // load messages
   const stored=await dbGetAll('messages');
   messages=stored.sort((a,b)=>a.time-b.time);
