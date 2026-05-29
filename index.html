@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Chat</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="config.js"></script>
+</head>
+<body>
+  <div id="name-modal">
+    <div class="modal-backdrop"></div>
+    <div class="modal-box">
+      <h1>Welcome</h1>
+      <p>Enter your name to start chatting</p>
+      <div class="modal-input-row">
+        <input type="text" id="name-input" placeholder="Your name" maxlength="30" autocomplete="off">
+        <button id="name-submit">Join</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="app" class="hidden">
+    <header id="header">
+      <div class="header-left">
+        <div class="friend-info">
+          <span class="friend-name" id="friend-name"></span>
+          <span class="status-indicator">
+            <span class="status-dot" id="status-dot"></span>
+            <span class="status-text" id="status-text">offline</span>
+          </span>
+        </div>
+      </div>
+      <div class="header-right">
+        <button id="theme-toggle" class="icon-btn" title="Toggle theme">🌙</button>
+      </div>
+    </header>
+
+    <div id="messages-container">
+      <div id="messages-list"></div>
+
+      <div id="typing-indicator" class="hidden">
+        <div class="typing-dots">
+          <span></span><span></span><span></span>
+        </div>
+        <span class="typing-text" id="typing-text"></span>
+      </div>
+
+      <div id="new-msg-toast" class="hidden">↓ New messages</div>
+    </div>
+
+    <div id="reply-bar" class="hidden">
+      <div class="reply-indicator">
+        <div class="reply-line"></div>
+        <div class="reply-info">
+          <span class="reply-sender" id="reply-sender"></span>
+          <span class="reply-content" id="reply-content"></span>
+        </div>
+      </div>
+      <button id="reply-close" class="icon-btn">✕</button>
+    </div>
+
+    <div class="input-area">
+      <button id="image-btn" class="icon-btn" title="Send image">📷</button>
+      <div id="input-wrapper">
+        <textarea id="message-input" placeholder="Type a message..." rows="1"></textarea>
+      </div>
+      <button id="send-btn" class="icon-btn send-btn" title="Send">➤</button>
+    </div>
+  </div>
+
+  <div id="format-toolbar" class="hidden">
+    <button data-format="bold" title="Bold"><strong>B</strong></button>
+    <button data-format="italic" title="Italic"><em>I</em></button>
+    <button data-format="strikethrough" title="Strikethrough"><s>S</s></button>
+    <button data-format="highlight" title="Highlight"><mark>H</mark></button>
+  </div>
+
+  <div id="reaction-picker" class="hidden">
+    <button>👍</button><button>❤️</button><button>😂</button><button>😮</button>
+    <button>😢</button><button>🙏</button><button>🔥</button><button>🎉</button>
+      <button>😡</button><button>💀</button>
+  </div>
+
+  <input type="file" id="image-upload" accept="image/*" hidden>
+
+  <script src="app.js"></script>
+</body>
+</html>
