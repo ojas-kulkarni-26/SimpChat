@@ -9,14 +9,12 @@
   const SELF = localStorage.getItem('chat_self_name');
   const FRIEND = CONFIG.FRIEND_NAME;
   let MY_NAME = SELF;
-  const POLL_MSG_MS = 1500;
-  const POLL_PRESENCE_MS = 3000;
-  const POLL_READ_MS = 3000;
-  const HEARTBEAT_MS = 5000;
-  const TYPING_IDLE_MS = 2500;
+  const POLL_MS = 10000;
+  const TYPING_IDLE_MS = 3000;
   const MAX_MESSAGES = 1000;
   const DECAY_BATCH = 100;
   const PAGE_SIZE = 50;
+  const ONLINE_WINDOW_MS = 15000;
 
   let state = {
     messages: [],
@@ -26,18 +24,18 @@
     editId: null,
     typingTimer: null,
     lastReadId: parseInt(localStorage.getItem('chat_lastReadId') || '0'),
-    online: false,
     hasMore: true,
     loadingMore: false,
     isAtBottom: true,
     unreadCount: 0,
-    pollTimers: [],
+    pollTimer: null,
+    tabVisible: true,
+    isSending: false,
   };
 
   const els = {};
 
   function q(sel) { return document.querySelector(sel); }
-  function qa(sel) { return document.querySelectorAll(sel); }
 
   function cacheEls() {
     els.app = q('#app');
@@ -67,6 +65,38 @@
 
   const API_URL = CONFIG.DB_URL.replace(/\/+$/, '') + '/v2/pipeline';
 
+  function norm(v) {
+    if (v === null || v === undefined) return { type: 'null' };
+    if (typeof v === 'number') {
+      return Number.isInteger(v)
+        ? { type: 'integer', value: String(v) }
+        : { type: 'float', value: v };
+    }
+    return { type: 'text', value: String(v) };
+  }
+
+  function parseVal(v) {
+    if (!v || v.type === 'null') return null;
+    if (v.type === 'integer') return parseInt(v.value, 10);
+    if (v.type === 'float') return parseFloat(v.value);
+    return v.value;
+  }
+
+  function parseRes(result) {
+    if (!result) return { rows: [], cols: [], last_insert_rowid: null, affected_row_count: 0 };
+    const names = (result.cols || []).map(c => c.name);
+    return {
+      rows: (result.rows || []).map(row =>
+        Object.fromEntries(names.map((n, i) => [n, parseVal(row[i])]))
+      ),
+      cols: names,
+      last_insert_rowid: result.last_insert_rowid != null
+        ? (typeof result.last_insert_rowid === 'object' ? parseVal(result.last_insert_rowid) : result.last_insert_rowid)
+        : null,
+      affected_row_count: result.affected_row_count || 0,
+    };
+  }
+
   async function db(requests) {
     const resp = await fetch(API_URL, {
       method: 'POST',
@@ -76,24 +106,32 @@
       },
       body: JSON.stringify({ requests }),
     });
-    if (!resp.ok) {
-      throw new Error('HTTP ' + resp.status);
-    }
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const data = await resp.json();
     for (const r of data.results) {
-      if (r.type === 'error') {
-        throw new Error(r.error ? r.error.message : 'SQL error');
-      }
+      if (r.type === 'error') throw new Error(r.error ? r.error.message : 'SQL error');
     }
     return data;
   }
 
   async function exec(sql, args) {
     const data = await db([
-      { type: 'execute', stmt: { sql, args } },
+      { type: 'execute', stmt: { sql, args: args ? args.map(norm) : [] } },
       { type: 'close' },
     ]);
-    return data.results[0].response.result;
+    return parseRes(data.results[0].response.result);
+  }
+
+  async function execBatch(stmts) {
+    const requests = [
+      ...stmts.map(s => ({
+        type: 'execute',
+        stmt: { sql: s.sql, args: (s.args || []).map(norm) },
+      })),
+      { type: 'close' },
+    ];
+    const data = await db(requests);
+    return data.results.slice(0, -1).map(r => parseRes(r.response.result));
   }
 
   async function initSchema() {
@@ -109,25 +147,13 @@
     const d = new Date(iso + (iso.endsWith('Z') ? '' : 'Z').replace(' ', 'T'));
     if (isNaN(d.getTime())) {
       const parts = iso.split(/[-: ]/);
-      if (parts.length >= 5) {
-        return parts[3] + ':' + parts[4];
-      }
+      if (parts.length >= 5) return parts[3] + ':' + parts[4];
       return '';
     }
     const h = d.getHours(), m = d.getMinutes();
     const ampm = h >= 12 ? 'PM' : 'AM';
     const h12 = h % 12 || 12;
     return h12 + ':' + String(m).padStart(2, '0') + ' ' + ampm;
-  }
-
-  function parseRows(result) {
-    if (!result || !result.rows || !result.cols) return [];
-    const colNames = result.cols.map(c => c.name);
-    return result.rows.map(row => {
-      const obj = {};
-      colNames.forEach((name, i) => obj[name] = row[i] != null ? row[i] : null);
-      return obj;
-    });
   }
 
   function escapeHtml(text) {
@@ -216,9 +242,7 @@
 
   function renderMessage(msg, prepend) {
     const existing = q('[data-id="' + msg.id + '"]');
-    if (existing) {
-      return updateMsgEl(existing, msg);
-    }
+    if (existing) return updateMsgEl(existing, msg);
     const el = createMsgEl(msg);
     if (prepend && state.msgList.firstChild) {
       state.msgList.insertBefore(el, state.msgList.firstChild);
@@ -259,20 +283,12 @@
     return c.scrollHeight - c.scrollTop - c.clientHeight < 80;
   }
 
-  function showToast() {
-    els.newMsgToast.classList.remove('hidden');
-  }
+  function showToast() { els.newMsgToast.classList.remove('hidden'); }
 
-  function hideToast() {
-    els.newMsgToast.classList.add('hidden');
-  }
+  function hideToast() { els.newMsgToast.classList.add('hidden'); }
 
   function updateUnreadCount() {
-    if (state.unreadCount > 0) {
-      document.title = '(' + state.unreadCount + ') Chat';
-    } else {
-      document.title = 'Chat';
-    }
+    document.title = state.unreadCount > 0 ? '(' + state.unreadCount + ') Chat' : 'Chat';
   }
 
   function showTyping(name) {
@@ -280,37 +296,90 @@
     els.typingIndicator.classList.remove('hidden');
   }
 
-  function hideTyping() {
-    els.typingIndicator.classList.add('hidden');
-  }
+  function hideTyping() { els.typingIndicator.classList.add('hidden'); }
 
   function updateStatus(online) {
     els.statusDot.className = 'status-dot' + (online ? ' online' : '');
     els.statusText.textContent = online ? 'online' : 'offline';
   }
 
-  async function fetchNewMessages() {
+  async function doCombinedPoll() {
+    if (!state.tabVisible) return;
     try {
-      const result = await exec('SELECT * FROM messages WHERE id > ? AND sender = ? ORDER BY id ASC', [state.lastKnownId, FRIEND]);
-      const rows = parseRows(result);
-      if (rows.length === 0) return;
-      for (const row of rows) {
-        row.read = false;
-        row._optimistic = false;
-        state.messages.push(row);
-        state.msgMap.set(row.id, row);
-        state.lastKnownId = Math.max(state.lastKnownId, row.id);
+      const stmts = [
+        { sql: 'SELECT * FROM messages WHERE id > ? AND sender = ? ORDER BY id ASC', args: [state.lastKnownId, FRIEND] },
+        { sql: 'UPDATE presence SET is_online = 1, last_seen = datetime("now") WHERE name = ?', args: [MY_NAME] },
+        { sql: 'SELECT * FROM presence WHERE name = ?', args: [FRIEND] },
+        { sql: 'SELECT last_read_id FROM read_state WHERE name = ?', args: [FRIEND] },
+      ];
+      const results = await execBatch(stmts);
+      const newMsgs = results[0];
+      const hbResult = results[1];
+      const presenceData = results[2];
+      const readData = results[3];
+
+      if (!MY_NAME) return;
+      if (hbResult.affected_row_count === 0) {
+        await exec('INSERT OR REPLACE INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime("now"))', [MY_NAME]);
       }
-      batchRender(rows);
-      if (state.isAtBottom) {
-        scrollToBottom(true);
+
+      if (newMsgs.rows.length > 0) {
+        for (const row of newMsgs.rows) {
+          row.read = false;
+          row._optimistic = false;
+          state.messages.push(row);
+          state.msgMap.set(row.id, row);
+          state.lastKnownId = Math.max(state.lastKnownId, row.id);
+        }
+        batchRender(newMsgs.rows);
+        if (state.isAtBottom) {
+          scrollToBottom(true);
+        } else {
+          state.unreadCount += newMsgs.rows.length;
+          updateUnreadCount();
+          showToast();
+        }
+      }
+
+      if (presenceData.rows.length > 0) {
+        const p = presenceData.rows[0];
+        const isOnline = p.is_online == 1;
+        let online = false;
+        if (isOnline && p.last_seen) {
+          const last = new Date(p.last_seen + 'Z');
+          online = (Date.now() - last.getTime()) < ONLINE_WINDOW_MS;
+        }
+        updateStatus(online);
+        if (p.is_typing == 1 && online) showTyping(FRIEND);
+        else hideTyping();
       } else {
-        state.unreadCount += rows.length;
-        updateUnreadCount();
-        showToast();
+        updateStatus(false);
+        hideTyping();
+      }
+
+      if (readData.rows.length > 0) {
+        const friendLastRead = readData.rows[0].last_read_id || 0;
+        let changed = false;
+        for (const msg of state.messages) {
+          if (msg.sender === MY_NAME && !msg.read && msg.id > 0 && msg.id <= friendLastRead) {
+            msg.read = true;
+            changed = true;
+          }
+        }
+        if (changed) {
+          for (const msg of state.messages) {
+            if (msg.sender === MY_NAME && msg.read) {
+              const el = q('[data-id="' + msg.id + '"]');
+              if (el) {
+                const st = el.querySelector('.message-status');
+                if (st) { st.className = 'message-status read'; st.textContent = '✓✓'; }
+              }
+            }
+          }
+        }
       }
     } catch (e) {
-      console.error('Poll messages error:', e);
+      console.error('Combined poll error:', e);
     }
   }
 
@@ -320,7 +389,7 @@
     try {
       const oldest = state.messages.length > 0 ? state.messages[0].id : 9999999;
       const result = await exec('SELECT * FROM messages WHERE id < ? ORDER BY id DESC LIMIT ?', [oldest, PAGE_SIZE]);
-      const rows = parseRows(result).reverse();
+      const rows = result.rows.reverse();
       if (rows.length < PAGE_SIZE) state.hasMore = false;
       if (rows.length === 0) { state.loadingMore = false; return; }
       for (const row of rows) {
@@ -347,57 +416,47 @@
     if (state.isSending) return;
     state.isSending = true;
     const tempId = -Date.now();
+    const replyToId = state.replyTo ? state.replyTo.id : null;
     const optimistic = {
-      id: tempId,
-      sender: MY_NAME,
-      content: content || '',
-      msg_type: msgType || 'text',
-      reply_to: state.replyTo ? state.replyTo.id : null,
+      id: tempId, sender: MY_NAME, content: content || '',
+      msg_type: msgType || 'text', reply_to: replyToId,
       reactions: '{}',
       created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
-      edited_at: null,
-      is_deleted: 0,
-      _optimistic: true,
-      read: false,
+      edited_at: null, is_deleted: 0, _optimistic: true, read: false,
     };
     state.messages.push(optimistic);
     state.msgMap.set(tempId, optimistic);
     renderMessage(optimistic);
     scrollToBottom(true);
+    clearReply();
     els.input.value = '';
     els.input.style.height = 'auto';
     els.sendBtn.disabled = true;
     els.sendBtn.style.opacity = '0.4';
 
-    const replyToId = state.replyTo ? state.replyTo.id : null;
-    clearReply();
-
     try {
       const result = await exec('INSERT INTO messages (sender, content, msg_type, reply_to, reactions) VALUES (?, ?, ?, ?, ?)', [
         MY_NAME, content || '', msgType || 'text', replyToId, '{}',
       ]);
-      const realId = result.last_insert_rowid;
-      const idx = state.messages.findIndex(m => m.id === tempId);
-      if (idx !== -1) {
-        state.messages[idx].id = realId;
-        state.msgMap.set(realId, state.messages[idx]);
-        state.msgMap.delete(tempId);
-        state.lastKnownId = Math.max(state.lastKnownId, realId);
-        state.messages[idx]._optimistic = false;
+      const realIdVal = result.last_insert_rowid;
+      if (realIdVal) {
+        const idx = state.messages.findIndex(m => m.id === tempId);
+        if (idx !== -1) {
+          state.messages[idx].id = realIdVal;
+          state.msgMap.set(realIdVal, state.messages[idx]);
+          state.msgMap.delete(tempId);
+          state.messages[idx]._optimistic = false;
+          const el = q('[data-id="' + tempId + '"]');
+          if (el) { el.dataset.id = realIdVal; updateMsgEl(el, state.messages[idx]); }
+        }
       }
-      const el = q('[data-id="' + tempId + '"]');
-      if (el) {
-        el.dataset.id = realId;
-        updateMsgEl(el, state.messages[idx]);
-      }
-
       await checkDecay();
     } catch (e) {
       console.error('Send error:', e);
       const el = q('[data-id="' + tempId + '"]');
       if (el) {
-        el.querySelector('.message-status').textContent = '✗';
-        el.querySelector('.message-status').style.color = 'var(--danger)';
+        const st = el.querySelector('.message-status');
+        if (st) { st.textContent = '✗'; st.style.color = 'var(--danger)'; }
       }
     } finally {
       state.isSending = false;
@@ -409,7 +468,7 @@
   async function checkDecay() {
     try {
       const countResult = await exec('SELECT COUNT(*) as cnt FROM messages');
-      const count = countResult.rows[0][0];
+      const count = countResult.rows[0]?.cnt || 0;
       if (count > MAX_MESSAGES) {
         await exec('DELETE FROM messages WHERE id IN (SELECT id FROM messages ORDER BY id ASC LIMIT ?)', [DECAY_BATCH]);
         const deletedIds = state.messages.slice(0, DECAY_BATCH).map(m => m.id);
@@ -420,9 +479,7 @@
           if (el) el.remove();
         });
       }
-    } catch (e) {
-      console.error('Decay error:', e);
-    }
+    } catch (e) { console.error('Decay error:', e); }
   }
 
   async function editMessage(id, newContent) {
@@ -436,9 +493,7 @@
         if (el) updateMsgEl(el, msg);
       }
       state.editId = null;
-    } catch (e) {
-      console.error('Edit error:', e);
-    }
+    } catch (e) { console.error('Edit error:', e); }
   }
 
   async function deleteMessage(id) {
@@ -450,9 +505,7 @@
         const el = q('[data-id="' + id + '"]');
         if (el) updateMsgEl(el, msg);
       }
-    } catch (e) {
-      console.error('Delete error:', e);
-    }
+    } catch (e) { console.error('Delete error:', e); }
   }
 
   async function toggleReaction(msgId, emoji) {
@@ -460,7 +513,7 @@
       const result = await exec('SELECT reactions FROM messages WHERE id = ?', [msgId]);
       if (!result.rows.length) return;
       let reactions = {};
-      try { reactions = JSON.parse(result.rows[0][0] || '{}'); } catch(e) {}
+      try { reactions = JSON.parse(result.rows[0].reactions || '{}'); } catch (e) {}
       const users = reactions[emoji] || [];
       const idx = users.indexOf(MY_NAME);
       if (idx > -1) {
@@ -478,9 +531,7 @@
         const el = q('[data-id="' + msgId + '"]');
         if (el) updateMsgEl(el, msg);
       }
-    } catch (e) {
-      console.error('Reaction error:', e);
-    }
+    } catch (e) { console.error('Reaction error:', e); }
   }
 
   async function sendImage(file) {
@@ -516,74 +567,9 @@
     });
   }
 
-  async function heartbeat() {
-    try {
-      await exec('UPDATE presence SET is_online = 1, last_seen = datetime("now") WHERE name = ?', [MY_NAME]);
-      const r = await exec('SELECT changes() AS c');
-      if (r.rows[0][0] === 0) {
-        await exec('INSERT INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime("now"))', [MY_NAME]);
-      }
-      state.online = true;
-    } catch (e) {
-      console.error('Heartbeat error:', e);
-    }
-  }
-
   async function updateTyping(isTyping) {
     try {
       await exec('UPDATE presence SET is_typing = ?, last_seen = datetime("now") WHERE name = ?', [isTyping ? 1 : 0, MY_NAME]);
-    } catch (e) {}
-  }
-
-  async function pollPresence() {
-    try {
-      const result = await exec('SELECT * FROM presence WHERE name = ?', [FRIEND]);
-      const rows = parseRows(result);
-      if (rows.length === 0) { updateStatus(false); return; }
-      const p = rows[0];
-      const isOnline = p.is_online == 1;
-      let online = false;
-      if (isOnline && p.last_seen) {
-        const last = new Date(p.last_seen + 'Z');
-        online = (Date.now() - last.getTime()) < 12000;
-      }
-      updateStatus(online);
-
-      const typingRows = parseRows(await exec('SELECT is_typing FROM presence WHERE name = ?', [FRIEND]));
-      if (typingRows.length > 0 && typingRows[0].is_typing == 1 && online) {
-        showTyping(FRIEND);
-      } else {
-        hideTyping();
-      }
-    } catch (e) {
-      console.error('Presence poll error:', e);
-    }
-  }
-
-  async function pollReadState() {
-    try {
-      const result = await exec('SELECT last_read_id FROM read_state WHERE name = ?', [FRIEND]);
-      const rows = parseRows(result);
-      if (rows.length === 0) return;
-      const friendLastRead = rows[0].last_read_id || 0;
-      let changed = false;
-      for (const msg of state.messages) {
-        if (msg.sender === MY_NAME && !msg.read && msg.id > 0 && msg.id <= friendLastRead) {
-          msg.read = true;
-          changed = true;
-        }
-      }
-      if (changed) {
-        state.messages.forEach(msg => {
-          if (msg.sender === MY_NAME && msg.read) {
-            const el = q('[data-id="' + msg.id + '"]');
-            if (el) {
-              const statusEl = el.querySelector('.message-status');
-              if (statusEl) { statusEl.className = 'message-status read'; statusEl.textContent = '✓✓'; }
-            }
-          }
-        });
-      }
     } catch (e) {}
   }
 
@@ -625,15 +611,13 @@
   }
 
   function startPolling() {
-    state.pollTimers.push(setInterval(fetchNewMessages, POLL_MSG_MS));
-    state.pollTimers.push(setInterval(pollPresence, POLL_PRESENCE_MS));
-    state.pollTimers.push(setInterval(pollReadState, POLL_READ_MS));
-    state.pollTimers.push(setInterval(heartbeat, HEARTBEAT_MS));
+    stopPolling();
+    doCombinedPoll();
+    state.pollTimer = setInterval(doCombinedPoll, POLL_MS);
   }
 
   function stopPolling() {
-    state.pollTimers.forEach(t => clearInterval(t));
-    state.pollTimers = [];
+    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
   }
 
   function showFormatToolbar() {
@@ -756,7 +740,7 @@
     }
     try {
       const result = await exec('SELECT * FROM messages ORDER BY id DESC LIMIT ?', [PAGE_SIZE]);
-      const rows = parseRows(result).reverse();
+      const rows = result.rows.reverse();
       rows.forEach(row => {
         row.read = false;
         row._optimistic = false;
@@ -767,8 +751,8 @@
       batchRender(rows);
       state.hasMore = rows.length >= PAGE_SIZE;
       scrollToBottom(false);
-      await heartbeat();
-      await pollReadState();
+
+      await exec('INSERT OR REPLACE INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime("now"))', [MY_NAME]);
       await updateMyReadState();
     } catch (e) {
       console.error('Load messages error:', e);
@@ -889,16 +873,10 @@
       }
 
       const img = e.target.closest('.message-image');
-      if (img) {
-        window.open(img.src);
-        return;
-      }
+      if (img) { window.open(img.src); return; }
 
       const btn = e.target.closest('button');
-      if (!btn) {
-        els.reactionPicker.classList.add('hidden');
-        return;
-      }
+      if (!btn) { els.reactionPicker.classList.add('hidden'); return; }
       const msgEl = e.target.closest('.message');
       if (!msgEl) return;
       const msgId = parseInt(msgEl.dataset.id);
@@ -930,6 +908,16 @@
       const msgId = parseInt(els.reactionPicker.dataset.msgId);
       if (msgId) toggleReaction(msgId, btn.textContent);
       els.reactionPicker.classList.add('hidden');
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      state.tabVisible = !document.hidden;
+      if (state.tabVisible) {
+        startPolling();
+        doCombinedPoll();
+      } else {
+        stopPolling();
+      }
     });
   }
 
