@@ -244,10 +244,10 @@
     const existing = q('[data-id="' + msg.id + '"]');
     if (existing) return updateMsgEl(existing, msg);
     const el = createMsgEl(msg);
-    if (prepend && state.msgList.firstChild) {
-      state.msgList.insertBefore(el, state.msgList.firstChild);
+    if (prepend && els.msgList.firstChild) {
+      els.msgList.insertBefore(el, els.msgList.firstChild);
     } else {
-      state.msgList.appendChild(el);
+      els.msgList.appendChild(el);
     }
     return el;
   }
@@ -262,10 +262,10 @@
       }
     });
     if (count === 0) return;
-    if (prepend && state.msgList.firstChild) {
-      state.msgList.insertBefore(frag, state.msgList.firstChild);
+    if (prepend && els.msgList.firstChild) {
+      els.msgList.insertBefore(frag, els.msgList.firstChild);
     } else {
-      state.msgList.appendChild(frag);
+      els.msgList.appendChild(frag);
     }
   }
 
