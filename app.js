@@ -135,7 +135,7 @@
   }
 
   async function initSchema() {
-    await exec('CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, content TEXT NOT NULL DEFAULT '''', msg_type TEXT NOT NULL DEFAULT ''text'', reply_to INTEGER, reactions TEXT NOT NULL DEFAULT ''{}'', created_at TEXT NOT NULL DEFAULT (datetime(''now'')), edited_at TEXT, is_deleted INTEGER NOT NULL DEFAULT 0)');
+    await exec(`CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', msg_type TEXT NOT NULL DEFAULT 'text', reply_to INTEGER, reactions TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), edited_at TEXT, is_deleted INTEGER NOT NULL DEFAULT 0)`);
     await exec('CREATE TABLE IF NOT EXISTS presence (name TEXT PRIMARY KEY, is_online INTEGER NOT NULL DEFAULT 0, is_typing INTEGER NOT NULL DEFAULT 0, last_seen TEXT)');
     await exec('CREATE TABLE IF NOT EXISTS read_state (name TEXT PRIMARY KEY, last_read_id INTEGER NOT NULL DEFAULT 0)');
     await exec('CREATE INDEX IF NOT EXISTS idx_messages_id ON messages(id)');
@@ -308,7 +308,7 @@
     try {
       const stmts = [
         { sql: 'SELECT * FROM messages WHERE id > ? AND sender = ? ORDER BY id ASC', args: [state.lastKnownId, FRIEND] },
-        { sql: 'UPDATE presence SET is_online = 1, last_seen = datetime(''now'') WHERE name = ?', args: [MY_NAME] },
+        { sql: `UPDATE presence SET is_online = 1, last_seen = datetime('now') WHERE name = ?`, args: [MY_NAME] },
         { sql: 'SELECT * FROM presence WHERE name = ?', args: [FRIEND] },
         { sql: 'SELECT last_read_id FROM read_state WHERE name = ?', args: [FRIEND] },
       ];
@@ -320,7 +320,7 @@
 
       if (!MY_NAME) return;
       if (hbResult.affected_row_count === 0) {
-        await exec('INSERT OR REPLACE INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime(''now''))', [MY_NAME]);
+        await exec(`INSERT OR REPLACE INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime('now'))`, [MY_NAME]);
       }
 
       if (newMsgs.rows.length > 0) {
@@ -484,7 +484,7 @@
 
   async function editMessage(id, newContent) {
     try {
-      await exec('UPDATE messages SET content = ?, edited_at = datetime(''now'') WHERE id = ? AND sender = ?', [newContent, id, MY_NAME]);
+      await exec(`UPDATE messages SET content = ?, edited_at = datetime('now') WHERE id = ? AND sender = ?`, [newContent, id, MY_NAME]);
       const msg = state.msgMap.get(id);
       if (msg) {
         msg.content = newContent;
@@ -569,7 +569,7 @@
 
   async function updateTyping(isTyping) {
     try {
-      await exec('UPDATE presence SET is_typing = ?, last_seen = datetime(''now'') WHERE name = ?', [isTyping ? 1 : 0, MY_NAME]);
+      await exec(`UPDATE presence SET is_typing = ?, last_seen = datetime('now') WHERE name = ?`, [isTyping ? 1 : 0, MY_NAME]);
     } catch (e) {}
   }
 
@@ -752,7 +752,7 @@
       state.hasMore = rows.length >= PAGE_SIZE;
       scrollToBottom(false);
 
-      await exec('INSERT OR REPLACE INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime(''now''))', [MY_NAME]);
+      await exec(`INSERT OR REPLACE INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime('now'))`, [MY_NAME]);
       await updateMyReadState();
     } catch (e) {
       console.error('Load messages error:', e);
