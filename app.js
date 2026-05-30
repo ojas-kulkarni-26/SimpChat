@@ -9,12 +9,14 @@
   const SELF = localStorage.getItem('chat_self_name');
   const FRIEND = CONFIG.FRIEND_NAME;
   let MY_NAME = SELF;
-  const POLL_MS = 10000;
-  const TYPING_IDLE_MS = 3000;
+  const POLL_MSG_MS = 1500;
+  const POLL_PRESENCE_MS = 3000;
+  const POLL_READ_MS = 3000;
+  const HEARTBEAT_MS = 5000;
+  const TYPING_IDLE_MS = 2500;
   const MAX_MESSAGES = 1000;
   const DECAY_BATCH = 100;
   const PAGE_SIZE = 50;
-  const ONLINE_WINDOW_MS = 15000;
 
   let state = {
     messages: [],
@@ -24,17 +26,18 @@
     editId: null,
     typingTimer: null,
     lastReadId: parseInt(localStorage.getItem('chat_lastReadId') || '0'),
+    online: false,
     hasMore: true,
     loadingMore: false,
     isAtBottom: true,
     unreadCount: 0,
-    pollTimer: null,
-    tabVisible: true,
+    pollTimers: [],
   };
 
   const els = {};
 
   function q(sel) { return document.querySelector(sel); }
+  function qa(sel) { return document.querySelectorAll(sel); }
 
   function cacheEls() {
     els.app = q('#app');
@@ -64,38 +67,6 @@
 
   const API_URL = CONFIG.DB_URL.replace(/\/+$/, '') + '/v2/pipeline';
 
-  function norm(v) {
-    if (v === null || v === undefined) return { type: 'null' };
-    if (typeof v === 'number') {
-      return Number.isInteger(v)
-        ? { type: 'integer', value: String(v) }
-        : { type: 'float', value: v };
-    }
-    return { type: 'text', value: String(v) };
-  }
-
-  function parseVal(v) {
-    if (!v || v.type === 'null') return null;
-    if (v.type === 'integer') return parseInt(v.value, 10);
-    if (v.type === 'float') return parseFloat(v.value);
-    return v.value;
-  }
-
-  function parseRes(result) {
-    if (!result) return { rows: [], cols: [], last_insert_rowid: null, affected_row_count: 0 };
-    const names = (result.cols || []).map(c => c.name);
-    return {
-      rows: (result.rows || []).map(row =>
-        Object.fromEntries(names.map((n, i) => [n, parseVal(row[i])]))
-      ),
-      cols: names,
-      last_insert_rowid: result.last_insert_rowid != null
-        ? (typeof result.last_insert_rowid === 'object' ? parseVal(result.last_insert_rowid) : result.last_insert_rowid)
-        : null,
-      affected_row_count: result.affected_row_count || 0,
-    };
-  }
-
   async function db(requests) {
     const resp = await fetch(API_URL, {
       method: 'POST',
@@ -105,32 +76,24 @@
       },
       body: JSON.stringify({ requests }),
     });
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    if (!resp.ok) {
+      throw new Error('HTTP ' + resp.status);
+    }
     const data = await resp.json();
     for (const r of data.results) {
-      if (r.type === 'error') throw new Error(r.error ? r.error.message : 'SQL error');
+      if (r.type === 'error') {
+        throw new Error(r.error ? r.error.message : 'SQL error');
+      }
     }
     return data;
   }
 
   async function exec(sql, args) {
     const data = await db([
-      { type: 'execute', stmt: { sql, args: args ? args.map(norm) : [] } },
+      { type: 'execute', stmt: { sql, args } },
       { type: 'close' },
     ]);
-    return parseRes(data.results[0].response.result);
-  }
-
-  async function execBatch(stmts) {
-    const requests = [
-      ...stmts.map(s => ({
-        type: 'execute',
-        stmt: { sql: s.sql, args: (s.args || []).map(norm) },
-      })),
-      { type: 'close' },
-    ];
-    const data = await db(requests);
-    return data.results.slice(0, -1).map(r => parseRes(r.response.result));
+    return data.results[0].response.result;
   }
 
   async function initSchema() {
@@ -146,13 +109,25 @@
     const d = new Date(iso + (iso.endsWith('Z') ? '' : 'Z').replace(' ', 'T'));
     if (isNaN(d.getTime())) {
       const parts = iso.split(/[-: ]/);
-      if (parts.length >= 5) return parts[3] + ':' + parts[4];
+      if (parts.length >= 5) {
+        return parts[3] + ':' + parts[4];
+      }
       return '';
     }
     const h = d.getHours(), m = d.getMinutes();
     const ampm = h >= 12 ? 'PM' : 'AM';
     const h12 = h % 12 || 12;
     return h12 + ':' + String(m).padStart(2, '0') + ' ' + ampm;
+  }
+
+  function parseRows(result) {
+    if (!result || !result.rows || !result.cols) return [];
+    const colNames = result.cols.map(c => c.name);
+    return result.rows.map(row => {
+      const obj = {};
+      colNames.forEach((name, i) => obj[name] = row[i] != null ? row[i] : null);
+      return obj;
+    });
   }
 
   function escapeHtml(text) {
@@ -175,6 +150,7 @@
     if (msg.is_deleted) {
       return '<div class="message-bubble" style="font-style:italic;opacity:0.6">Message deleted</div>';
     }
+
     let replyHTML = '';
     if (msg.reply_to) {
       const parent = state.msgMap.get(msg.reply_to);
@@ -182,30 +158,37 @@
         replyHTML = '<div class="reply-preview"><span class="reply-preview-sender">' + escapeHtml(parent.sender) + '</span><span class="reply-preview-content">' + escapeHtml(parent.content.substring(0, 80)) + '</span></div>';
       }
     }
+
     let contentHTML = '';
     if (msg.msg_type === 'image') {
       contentHTML = '<img src="' + msg.content + '" class="message-image" loading="lazy">';
     } else if (msg.content) {
       contentHTML = renderMarkdown(msg.content);
     }
+
     let reactionsHTML = '';
     if (msg.reactions) {
       try {
         const r = typeof msg.reactions === 'string' ? JSON.parse(msg.reactions) : msg.reactions;
         const entries = Object.entries(r);
         if (entries.length > 0) {
-          reactionsHTML = '<div class="reactions-bar">' + entries.map(([emoji]) => '<span class="reaction-badge" data-emoji="' + escapeHtml(emoji) + '">' + emoji + '</span>').join('') + '</div>';
+          reactionsHTML = '<div class="reactions-bar">' + entries.map(([emoji, users]) => '<span class="reaction-badge" data-emoji="' + escapeHtml(emoji) + '">' + emoji + '</span>').join('') + '</div>';
         }
       } catch (e) {}
     }
+
     const timeStr = formatTime(msg.created_at);
     const isSelf = msg.sender === MY_NAME;
     const edited = msg.edited_at ? ' <span style="font-size:10px;opacity:0.5">edited</span>' : '';
+
     return '<div class="message-bubble">'
-      + replyHTML + contentHTML
+      + replyHTML
+      + contentHTML
       + '<span class="message-time">' + timeStr
       + (isSelf ? '<span class="message-status ' + (msg.read ? 'read' : 'sent') + '">' + (msg._optimistic ? '🕐' : (msg.read ? '✓✓' : '✓')) + '</span>' : '')
-      + edited + '</span></div>'
+      + edited
+      + '</span>'
+      + '</div>'
       + reactionsHTML;
   }
 
@@ -219,7 +202,8 @@
       + '<button class="action-reply" title="Reply">↩️</button>'
       + '<button class="action-react" title="React">😊</button>'
       + (isSelf ? '<button class="action-edit own-only" title="Edit">✏️</button><button class="action-delete own-only" title="Delete">🗑️</button>' : '')
-      + '</div>' + msgBubbleHTML(msg);
+      + '</div>'
+      + msgBubbleHTML(msg);
     div._msg = msg;
     return div;
   }
@@ -232,7 +216,9 @@
 
   function renderMessage(msg, prepend) {
     const existing = q('[data-id="' + msg.id + '"]');
-    if (existing) return updateMsgEl(existing, msg);
+    if (existing) {
+      return updateMsgEl(existing, msg);
+    }
     const el = createMsgEl(msg);
     if (prepend && state.msgList.firstChild) {
       state.msgList.insertBefore(el, state.msgList.firstChild);
@@ -260,7 +246,10 @@
   }
 
   function scrollToBottom(smooth) {
-    els.msgContainer.scrollTo({ top: els.msgContainer.scrollHeight, behavior: smooth ? 'smooth' : 'auto' });
+    els.msgContainer.scrollTo({
+      top: els.msgContainer.scrollHeight,
+      behavior: smooth ? 'smooth' : 'auto',
+    });
     state.isAtBottom = true;
     hideToast();
   }
@@ -270,11 +259,20 @@
     return c.scrollHeight - c.scrollTop - c.clientHeight < 80;
   }
 
-  function showToast() { els.newMsgToast.classList.remove('hidden'); }
-  function hideToast() { els.newMsgToast.classList.add('hidden'); }
+  function showToast() {
+    els.newMsgToast.classList.remove('hidden');
+  }
+
+  function hideToast() {
+    els.newMsgToast.classList.add('hidden');
+  }
 
   function updateUnreadCount() {
-    document.title = state.unreadCount > 0 ? '(' + state.unreadCount + ') Chat' : 'Chat';
+    if (state.unreadCount > 0) {
+      document.title = '(' + state.unreadCount + ') Chat';
+    } else {
+      document.title = 'Chat';
+    }
   }
 
   function showTyping(name) {
@@ -291,13 +289,38 @@
     els.statusText.textContent = online ? 'online' : 'offline';
   }
 
+  async function fetchNewMessages() {
+    try {
+      const result = await exec('SELECT * FROM messages WHERE id > ? AND sender = ? ORDER BY id ASC', [state.lastKnownId, FRIEND]);
+      const rows = parseRows(result);
+      if (rows.length === 0) return;
+      for (const row of rows) {
+        row.read = false;
+        row._optimistic = false;
+        state.messages.push(row);
+        state.msgMap.set(row.id, row);
+        state.lastKnownId = Math.max(state.lastKnownId, row.id);
+      }
+      batchRender(rows);
+      if (state.isAtBottom) {
+        scrollToBottom(true);
+      } else {
+        state.unreadCount += rows.length;
+        updateUnreadCount();
+        showToast();
+      }
+    } catch (e) {
+      console.error('Poll messages error:', e);
+    }
+  }
+
   async function fetchOlderMessages() {
     if (state.loadingMore || !state.hasMore) return;
     state.loadingMore = true;
     try {
       const oldest = state.messages.length > 0 ? state.messages[0].id : 9999999;
       const result = await exec('SELECT * FROM messages WHERE id < ? ORDER BY id DESC LIMIT ?', [oldest, PAGE_SIZE]);
-      const rows = result.rows.reverse();
+      const rows = parseRows(result).reverse();
       if (rows.length < PAGE_SIZE) state.hasMore = false;
       if (rows.length === 0) { state.loadingMore = false; return; }
       for (const row of rows) {
@@ -324,47 +347,57 @@
     if (state.isSending) return;
     state.isSending = true;
     const tempId = -Date.now();
-    const replyToId = state.replyTo ? state.replyTo.id : null;
     const optimistic = {
-      id: tempId, sender: MY_NAME, content: content || '',
-      msg_type: msgType || 'text', reply_to: replyToId,
+      id: tempId,
+      sender: MY_NAME,
+      content: content || '',
+      msg_type: msgType || 'text',
+      reply_to: state.replyTo ? state.replyTo.id : null,
       reactions: '{}',
       created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
-      edited_at: null, is_deleted: 0, _optimistic: true, read: false,
+      edited_at: null,
+      is_deleted: 0,
+      _optimistic: true,
+      read: false,
     };
     state.messages.push(optimistic);
     state.msgMap.set(tempId, optimistic);
     renderMessage(optimistic);
     scrollToBottom(true);
-    clearReply();
     els.input.value = '';
     els.input.style.height = 'auto';
     els.sendBtn.disabled = true;
     els.sendBtn.style.opacity = '0.4';
 
+    const replyToId = state.replyTo ? state.replyTo.id : null;
+    clearReply();
+
     try {
       const result = await exec('INSERT INTO messages (sender, content, msg_type, reply_to, reactions) VALUES (?, ?, ?, ?, ?)', [
         MY_NAME, content || '', msgType || 'text', replyToId, '{}',
       ]);
-      const realIdVal = result.last_insert_rowid;
-      if (realIdVal) {
-        const idx = state.messages.findIndex(m => m.id === tempId);
-        if (idx !== -1) {
-          state.messages[idx].id = realIdVal;
-          state.msgMap.set(realIdVal, state.messages[idx]);
-          state.msgMap.delete(tempId);
-          state.messages[idx]._optimistic = false;
-          const el = q('[data-id="' + tempId + '"]');
-          if (el) { el.dataset.id = realIdVal; updateMsgEl(el, state.messages[idx]); }
-        }
+      const realId = result.last_insert_rowid;
+      const idx = state.messages.findIndex(m => m.id === tempId);
+      if (idx !== -1) {
+        state.messages[idx].id = realId;
+        state.msgMap.set(realId, state.messages[idx]);
+        state.msgMap.delete(tempId);
+        state.lastKnownId = Math.max(state.lastKnownId, realId);
+        state.messages[idx]._optimistic = false;
       }
+      const el = q('[data-id="' + tempId + '"]');
+      if (el) {
+        el.dataset.id = realId;
+        updateMsgEl(el, state.messages[idx]);
+      }
+
       await checkDecay();
     } catch (e) {
       console.error('Send error:', e);
       const el = q('[data-id="' + tempId + '"]');
       if (el) {
-        const st = el.querySelector('.message-status');
-        if (st) { st.textContent = '✗'; st.style.color = 'var(--danger)'; }
+        el.querySelector('.message-status').textContent = '✗';
+        el.querySelector('.message-status').style.color = 'var(--danger)';
       }
     } finally {
       state.isSending = false;
@@ -376,7 +409,7 @@
   async function checkDecay() {
     try {
       const countResult = await exec('SELECT COUNT(*) as cnt FROM messages');
-      const count = countResult.rows[0]?.cnt || 0;
+      const count = countResult.rows[0][0];
       if (count > MAX_MESSAGES) {
         await exec('DELETE FROM messages WHERE id IN (SELECT id FROM messages ORDER BY id ASC LIMIT ?)', [DECAY_BATCH]);
         const deletedIds = state.messages.slice(0, DECAY_BATCH).map(m => m.id);
@@ -387,7 +420,9 @@
           if (el) el.remove();
         });
       }
-    } catch (e) { console.error('Decay error:', e); }
+    } catch (e) {
+      console.error('Decay error:', e);
+    }
   }
 
   async function editMessage(id, newContent) {
@@ -401,7 +436,9 @@
         if (el) updateMsgEl(el, msg);
       }
       state.editId = null;
-    } catch (e) { console.error('Edit error:', e); }
+    } catch (e) {
+      console.error('Edit error:', e);
+    }
   }
 
   async function deleteMessage(id) {
@@ -413,7 +450,9 @@
         const el = q('[data-id="' + id + '"]');
         if (el) updateMsgEl(el, msg);
       }
-    } catch (e) { console.error('Delete error:', e); }
+    } catch (e) {
+      console.error('Delete error:', e);
+    }
   }
 
   async function toggleReaction(msgId, emoji) {
@@ -421,7 +460,7 @@
       const result = await exec('SELECT reactions FROM messages WHERE id = ?', [msgId]);
       if (!result.rows.length) return;
       let reactions = {};
-      try { reactions = JSON.parse(result.rows[0].reactions || '{}'); } catch (e) {}
+      try { reactions = JSON.parse(result.rows[0][0] || '{}'); } catch(e) {}
       const users = reactions[emoji] || [];
       const idx = users.indexOf(MY_NAME);
       if (idx > -1) {
@@ -439,7 +478,9 @@
         const el = q('[data-id="' + msgId + '"]');
         if (el) updateMsgEl(el, msg);
       }
-    } catch (e) { console.error('Reaction error:', e); }
+    } catch (e) {
+      console.error('Reaction error:', e);
+    }
   }
 
   async function sendImage(file) {
@@ -461,7 +502,8 @@
             if (w > h) { h = h * maxSize / w; w = maxSize; }
             else { w = w * maxSize / h; h = maxSize; }
           }
-          canvas.width = w; canvas.height = h;
+          canvas.width = w;
+          canvas.height = h;
           const ctx = canvas.getContext('2d');
           ctx.drawImage(img, 0, 0, w, h);
           resolve(canvas.toDataURL('image/jpeg', 0.75));
@@ -474,9 +516,74 @@
     });
   }
 
+  async function heartbeat() {
+    try {
+      await exec('UPDATE presence SET is_online = 1, last_seen = datetime("now") WHERE name = ?', [MY_NAME]);
+      const r = await exec('SELECT changes() AS c');
+      if (r.rows[0][0] === 0) {
+        await exec('INSERT INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime("now"))', [MY_NAME]);
+      }
+      state.online = true;
+    } catch (e) {
+      console.error('Heartbeat error:', e);
+    }
+  }
+
   async function updateTyping(isTyping) {
     try {
       await exec('UPDATE presence SET is_typing = ?, last_seen = datetime("now") WHERE name = ?', [isTyping ? 1 : 0, MY_NAME]);
+    } catch (e) {}
+  }
+
+  async function pollPresence() {
+    try {
+      const result = await exec('SELECT * FROM presence WHERE name = ?', [FRIEND]);
+      const rows = parseRows(result);
+      if (rows.length === 0) { updateStatus(false); return; }
+      const p = rows[0];
+      const isOnline = p.is_online == 1;
+      let online = false;
+      if (isOnline && p.last_seen) {
+        const last = new Date(p.last_seen + 'Z');
+        online = (Date.now() - last.getTime()) < 12000;
+      }
+      updateStatus(online);
+
+      const typingRows = parseRows(await exec('SELECT is_typing FROM presence WHERE name = ?', [FRIEND]));
+      if (typingRows.length > 0 && typingRows[0].is_typing == 1 && online) {
+        showTyping(FRIEND);
+      } else {
+        hideTyping();
+      }
+    } catch (e) {
+      console.error('Presence poll error:', e);
+    }
+  }
+
+  async function pollReadState() {
+    try {
+      const result = await exec('SELECT last_read_id FROM read_state WHERE name = ?', [FRIEND]);
+      const rows = parseRows(result);
+      if (rows.length === 0) return;
+      const friendLastRead = rows[0].last_read_id || 0;
+      let changed = false;
+      for (const msg of state.messages) {
+        if (msg.sender === MY_NAME && !msg.read && msg.id > 0 && msg.id <= friendLastRead) {
+          msg.read = true;
+          changed = true;
+        }
+      }
+      if (changed) {
+        state.messages.forEach(msg => {
+          if (msg.sender === MY_NAME && msg.read) {
+            const el = q('[data-id="' + msg.id + '"]');
+            if (el) {
+              const statusEl = el.querySelector('.message-status');
+              if (statusEl) { statusEl.className = 'message-status read'; statusEl.textContent = '✓✓'; }
+            }
+          }
+        });
+      }
     } catch (e) {}
   }
 
@@ -495,88 +602,38 @@
     }
   }
 
-  async function combinedPoll() {
-    if (!state.tabVisible) return;
-    try {
-      const results = await execBatch([
-        { sql: "UPDATE presence SET is_online = 1, last_seen = datetime('now') WHERE name = ?", args: [MY_NAME] },
-        { sql: 'SELECT * FROM messages WHERE id > ? AND sender = ? ORDER BY id ASC', args: [state.lastKnownId, FRIEND] },
-        { sql: 'SELECT is_online, is_typing, last_seen FROM presence WHERE name = ?', args: [FRIEND] },
-        { sql: 'SELECT last_read_id FROM read_state WHERE name = ?', args: [FRIEND] },
-      ]);
+  let readStateThrottle = null;
 
-      // Result 1: new messages
-      const msgRows = results[1]?.rows || [];
-      if (msgRows.length > 0) {
-        for (const row of msgRows) {
-          row.read = false;
-          row._optimistic = false;
-          state.messages.push(row);
-          state.msgMap.set(row.id, row);
-          state.lastKnownId = Math.max(state.lastKnownId, row.id);
-        }
-        batchRender(msgRows);
-        if (state.isAtBottom) {
-          scrollToBottom(true);
-        } else {
-          state.unreadCount += msgRows.length;
-          updateUnreadCount();
-          showToast();
-        }
+  function onScroll() {
+    state.isAtBottom = isNearBottom();
+    if (state.isAtBottom) {
+      hideToast();
+      if (state.unreadCount > 0) {
+        state.unreadCount = 0;
+        updateUnreadCount();
       }
-
-      // Result 2: presence
-      const presRows = results[2]?.rows || [];
-      if (presRows.length > 0) {
-        const p = presRows[0];
-        const online = p.is_online == 1 && p.last_seen
-          ? (Date.now() - new Date(String(p.last_seen) + 'Z').getTime()) < ONLINE_WINDOW_MS
-          : false;
-        updateStatus(online);
-        if (p.is_typing == 1 && online) {
-          showTyping(FRIEND);
-        } else {
-          hideTyping();
-        }
-      } else {
-        updateStatus(false);
-      }
-
-      // Result 3: read state
-      const readRows = results[3]?.rows || [];
-      if (readRows.length > 0) {
-        const friendLastRead = readRows[0].last_read_id || 0;
-        let changed = false;
-        for (const msg of state.messages) {
-          if (msg.sender === MY_NAME && !msg.read && msg.id > 0 && msg.id <= friendLastRead) {
-            msg.read = true;
-            changed = true;
-          }
-        }
-        if (changed) {
-          for (const msg of state.messages) {
-            if (msg.sender === MY_NAME && msg.read) {
-              const el = q('[data-id="' + msg.id + '"]');
-              if (el) {
-                const st = el.querySelector('.message-status');
-                if (st) { st.className = 'message-status read'; st.textContent = '✓✓'; }
-              }
-            }
-          }
-        }
-      }
-    } catch (e) {
-      console.error('Poll error:', e);
+    }
+    if (els.msgContainer.scrollTop < 50 && state.hasMore) {
+      fetchOlderMessages();
+    }
+    if (!readStateThrottle) {
+      readStateThrottle = setTimeout(() => {
+        readStateThrottle = null;
+        updateMyReadState();
+      }, 500);
     }
   }
 
   function startPolling() {
-    stopPolling();
-    state.pollTimer = setInterval(combinedPoll, POLL_MS);
+    state.pollTimers.push(setInterval(fetchNewMessages, POLL_MSG_MS));
+    state.pollTimers.push(setInterval(pollPresence, POLL_PRESENCE_MS));
+    state.pollTimers.push(setInterval(pollReadState, POLL_READ_MS));
+    state.pollTimers.push(setInterval(heartbeat, HEARTBEAT_MS));
   }
 
   function stopPolling() {
-    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+    state.pollTimers.forEach(t => clearInterval(t));
+    state.pollTimers = [];
   }
 
   function showFormatToolbar() {
@@ -596,9 +653,11 @@
 
   function applyFormat(format) {
     const ta = els.input;
-    const start = ta.selectionStart, end = ta.selectionEnd;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
     if (start === end) { els.formatToolbar.classList.add('hidden'); return; }
-    const text = ta.value, selected = text.substring(start, end);
+    const text = ta.value;
+    const selected = text.substring(start, end);
     let wrapped;
     switch (format) {
       case 'bold': wrapped = '**' + selected + '**'; break;
@@ -649,6 +708,7 @@
   async function init() {
     cacheEls();
     parseArgs();
+
     const saved = localStorage.getItem('chat_self_name');
     if (saved) {
       MY_NAME = saved;
@@ -659,11 +719,15 @@
       els.app.classList.add('hidden');
       els.nameInput.focus();
     }
+
     const theme = localStorage.getItem('chat_theme') || 'dark';
     document.documentElement.dataset.theme = theme;
     els.themeToggle.textContent = theme === 'dark' ? '🌙' : '☀️';
+
     els.friendName.textContent = FRIEND;
+
     setupEvents();
+
     if (saved) {
       await startApp();
     } else {
@@ -683,23 +747,16 @@
   }
 
   async function startApp() {
-    document.addEventListener('visibilitychange', () => {
-      state.tabVisible = !document.hidden;
-      if (state.tabVisible) { startPolling(); combinedPoll(); }
-      else stopPolling();
-    });
-
-    try { await initSchema(); }
-    catch (e) {
+    try {
+      await initSchema();
+    } catch (e) {
       console.error('Schema init error:', e);
       els.msgList.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger)">Database connection failed. Check your Turso credentials in config.js</div>';
       return;
     }
     try {
-      const schemaOk = await exec('SELECT 1');
-      await exec("INSERT OR REPLACE INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime('now'))", [MY_NAME]);
       const result = await exec('SELECT * FROM messages ORDER BY id DESC LIMIT ?', [PAGE_SIZE]);
-      const rows = result.rows.reverse();
+      const rows = parseRows(result).reverse();
       rows.forEach(row => {
         row.read = false;
         row._optimistic = false;
@@ -710,7 +767,8 @@
       batchRender(rows);
       state.hasMore = rows.length >= PAGE_SIZE;
       scrollToBottom(false);
-      await combinedPoll();
+      await heartbeat();
+      await pollReadState();
       await updateMyReadState();
     } catch (e) {
       console.error('Load messages error:', e);
@@ -727,17 +785,7 @@
       els.themeToggle.textContent = next === 'dark' ? '🌙' : '☀️';
     });
 
-    els.msgContainer.addEventListener('scroll', (e) => {
-      state.isAtBottom = isNearBottom();
-      if (state.isAtBottom) {
-        hideToast();
-        if (state.unreadCount > 0) { state.unreadCount = 0; updateUnreadCount(); }
-      }
-      if (els.msgContainer.scrollTop < 50 && state.hasMore) fetchOlderMessages();
-      if (!state._readThrottle) {
-        state._readThrottle = setTimeout(() => { state._readThrottle = null; updateMyReadState(); }, 500);
-      }
-    }, { passive: true });
+    els.msgContainer.addEventListener('scroll', onScroll, { passive: true });
 
     els.newMsgToast.addEventListener('click', () => {
       scrollToBottom(true);
@@ -752,7 +800,9 @@
       els.input.style.height = Math.min(els.input.scrollHeight, 120) + 'px';
       clearTimeout(state.typingTimer);
       updateTyping(true);
-      state.typingTimer = setTimeout(() => updateTyping(false), TYPING_IDLE_MS);
+      state.typingTimer = setTimeout(() => {
+        updateTyping(false);
+      }, TYPING_IDLE_MS);
     });
 
     els.input.addEventListener('keydown', (e) => {
@@ -765,17 +815,25 @@
           state.editId = null;
           els.input.value = '';
           els.input.style.height = 'auto';
-        } else if (text) sendMessage(text, 'text');
+        } else if (text) {
+          sendMessage(text, 'text');
+        }
       }
-      if (e.key === 'Escape') { clearReply(); state.editId = null; }
+      if (e.key === 'Escape') {
+        clearReply();
+        state.editId = null;
+      }
     });
 
     els.input.addEventListener('mouseup', showFormatToolbar);
     els.input.addEventListener('keyup', showFormatToolbar);
-
     document.addEventListener('click', (e) => {
-      if (!els.formatToolbar.contains(e.target)) els.formatToolbar.classList.add('hidden');
-      if (!els.reactionPicker.contains(e.target) && !e.target.closest('.action-react')) els.reactionPicker.classList.add('hidden');
+      if (!els.formatToolbar.contains(e.target)) {
+        els.formatToolbar.classList.add('hidden');
+      }
+      if (!els.reactionPicker.contains(e.target) && !e.target.closest('.action-react')) {
+        els.reactionPicker.classList.add('hidden');
+      }
     });
 
     els.sendBtn.addEventListener('click', () => {
@@ -785,17 +843,26 @@
         state.editId = null;
         els.input.value = '';
         els.input.style.height = 'auto';
-      } else if (text) sendMessage(text, 'text');
+      } else if (text) {
+        sendMessage(text, 'text');
+      }
     });
 
     els.imageBtn.addEventListener('click', () => els.imageUpload.click());
-    els.imageUpload.addEventListener('change', (e) => { if (e.target.files[0]) sendImage(e.target.files[0]); e.target.value = ''; });
+    els.imageUpload.addEventListener('change', (e) => {
+      if (e.target.files[0]) sendImage(e.target.files[0]);
+      e.target.value = '';
+    });
 
     document.addEventListener('paste', (e) => {
       const items = e.clipboardData?.items;
       if (!items) return;
       for (const item of items) {
-        if (item.type.startsWith('image/')) { e.preventDefault(); sendImage(item.getAsFile()); return; }
+        if (item.type.startsWith('image/')) {
+          e.preventDefault();
+          sendImage(item.getAsFile());
+          return;
+        }
       }
     });
 
@@ -820,16 +887,27 @@
         if (msgId) toggleReaction(msgId, badge.dataset.emoji);
         return;
       }
+
       const img = e.target.closest('.message-image');
-      if (img) { window.open(img.src); return; }
+      if (img) {
+        window.open(img.src);
+        return;
+      }
+
       const btn = e.target.closest('button');
-      if (!btn) { els.reactionPicker.classList.add('hidden'); return; }
+      if (!btn) {
+        els.reactionPicker.classList.add('hidden');
+        return;
+      }
       const msgEl = e.target.closest('.message');
       if (!msgEl) return;
       const msgId = parseInt(msgEl.dataset.id);
       const msg = state.msgMap.get(msgId);
       if (!msg) return;
-      if (btn.classList.contains('action-reply')) setReply(msgId, msg.sender, msg.is_deleted ? '[deleted]' : msg.content);
+
+      if (btn.classList.contains('action-reply')) {
+        setReply(msgId, msg.sender, msg.is_deleted ? '[deleted]' : msg.content);
+      }
       if (btn.classList.contains('action-react')) {
         const rect = btn.getBoundingClientRect();
         els.reactionPicker.style.left = Math.max(4, rect.left + rect.width / 2 - 120) + 'px';
@@ -837,8 +915,13 @@
         els.reactionPicker.dataset.msgId = msgId;
         els.reactionPicker.classList.remove('hidden');
       }
-      if (btn.classList.contains('action-edit')) { if (msg.is_deleted) return; startEdit(msgId, msg.content); }
-      if (btn.classList.contains('action-delete')) { if (confirm('Delete this message?')) deleteMessage(msgId); }
+      if (btn.classList.contains('action-edit')) {
+        if (msg.is_deleted) return;
+        startEdit(msgId, msg.content);
+      }
+      if (btn.classList.contains('action-delete')) {
+        if (confirm('Delete this message?')) deleteMessage(msgId);
+      }
     });
 
     els.reactionPicker.addEventListener('click', (e) => {
