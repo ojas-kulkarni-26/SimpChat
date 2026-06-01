@@ -620,13 +620,6 @@ header {
   transform: scale(0.9);
 }
 
-.message.self .message-actions {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-  pointer-events: auto;
-  transition-delay: 0s;
-}
-
 .message-actions button.own-only {
   display: none;
 }
