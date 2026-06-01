@@ -287,7 +287,7 @@
   function hideToast() { els.newMsgToast.classList.add('hidden'); }
 
   function updateUnreadCount() {
-    document.title = state.unreadCount > 0 ? '(' + state.unreadCount + ') Chat' : 'Chat';
+    document.title = state.unreadCount > 0 ? '(' + state.unreadCount + ') SimpChat' : 'SimpChat';
   }
 
   function showTyping(name) {
