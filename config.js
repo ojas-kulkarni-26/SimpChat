@@ -1,5 +1,5 @@
 const CONFIG = {
-  DB_URL: 'https://simpchat-ojaskul26.aws-ap-south-1.turso.io',
-  DB_TOKEN: 'eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3ODAwNzM3ODMsImlkIjoiMDE5ZTc0YTktZjcwMS03MWNiLWE0MDYtNTVlZmEzYWVjNjAxIiwicmlkIjoiMjBhNjNiNWYtZWRhNy00MTU4LWJkMmYtZGIxODBhZTllODdiIn0.wHH0NKaTPNBDxyhi6rkPIiVQOGg7-B03g8N_TU6FDeoFxXsN1ke_Ko5fn4LV1El9aWBR7kCj5VdJmZ184H2xCg',
+  SUPABASE_URL: 'https://tjjmkwffbbcuztclmfap.supabase.co',
+  SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRqam1rd2ZmYmJjdXp0Y2xtZmFwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODAyODcxNjAsImV4cCI6MjA5NTg2MzE2MH0.0x5VPc8HCE6TlsdnNC0d7aV3B1fZUgldVwOl2w3xeeg',
   FRIEND_NAME: 'Friend'
 };

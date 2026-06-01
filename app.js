@@ -1,20 +1,18 @@
 (function () {
   'use strict';
 
-  if (!CONFIG.DB_URL || CONFIG.DB_URL.includes('your-database')) {
-    document.body.innerHTML = '<div style="padding:40px;text-align:center;font-family:sans-serif"><h2>Config Required</h2><p>Edit <code>config.js</code> with your Turso DB URL, token, and friend\'s name.</p></div>';
+  if (!CONFIG.SUPABASE_URL || !CONFIG.SUPABASE_ANON_KEY) {
+    document.body.innerHTML = '<div style="padding:40px;text-align:center;font-family:sans-serif"><h2>Config Required</h2><p>Edit <code>config.js</code> with your Supabase URL and anon key.</p></div>';
     return;
   }
 
   const SELF = localStorage.getItem('chat_self_name');
   const FRIEND = CONFIG.FRIEND_NAME;
   let MY_NAME = SELF;
-  const POLL_MS = 1500;
   const TYPING_IDLE_MS = 3000;
   const MAX_MESSAGES = 1000;
   const DECAY_BATCH = 100;
   const PAGE_SIZE = 50;
-  const ONLINE_WINDOW_MS = 15000;
 
   let state = {
     messages: [],
@@ -28,9 +26,8 @@
     loadingMore: false,
     isAtBottom: true,
     unreadCount: 0,
-    pollTimer: null,
-    tabVisible: true,
     isSending: false,
+    ready: false,
   };
 
   const els = {};
@@ -63,93 +60,13 @@
     els.reactionPicker = q('#reaction-picker');
   }
 
-  const API_URL = CONFIG.DB_URL.replace(/\/+$/, '') + '/v2/pipeline';
-
-  function norm(v) {
-    if (v === null || v === undefined) return { type: 'null' };
-    if (typeof v === 'number') {
-      return Number.isInteger(v)
-        ? { type: 'integer', value: String(v) }
-        : { type: 'float', value: v };
-    }
-    return { type: 'text', value: String(v) };
-  }
-
-  function parseVal(v) {
-    if (!v || v.type === 'null') return null;
-    if (v.type === 'integer') return parseInt(v.value, 10);
-    if (v.type === 'float') return parseFloat(v.value);
-    return v.value;
-  }
-
-  function parseRes(result) {
-    if (!result) return { rows: [], cols: [], last_insert_rowid: null, affected_row_count: 0 };
-    const names = (result.cols || []).map(c => c.name);
-    return {
-      rows: (result.rows || []).map(row =>
-        Object.fromEntries(names.map((n, i) => [n, parseVal(row[i])]))
-      ),
-      cols: names,
-      last_insert_rowid: result.last_insert_rowid != null
-        ? (typeof result.last_insert_rowid === 'object' ? parseVal(result.last_insert_rowid) : result.last_insert_rowid)
-        : null,
-      affected_row_count: result.affected_row_count || 0,
-    };
-  }
-
-  async function db(requests) {
-    const resp = await fetch(API_URL, {
-      method: 'POST',
-      headers: {
-        'Authorization': 'Bearer ' + CONFIG.DB_TOKEN,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({ requests }),
-    });
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    for (const r of data.results) {
-      if (r.type === 'error') throw new Error(r.error ? r.error.message : 'SQL error');
-    }
-    return data;
-  }
-
-  async function exec(sql, args) {
-    const data = await db([
-      { type: 'execute', stmt: { sql, args: args ? args.map(norm) : [] } },
-      { type: 'close' },
-    ]);
-    return parseRes(data.results[0].response.result);
-  }
-
-  async function execBatch(stmts) {
-    const requests = [
-      ...stmts.map(s => ({
-        type: 'execute',
-        stmt: { sql: s.sql, args: (s.args || []).map(norm) },
-      })),
-      { type: 'close' },
-    ];
-    const data = await db(requests);
-    return data.results.slice(0, -1).map(r => parseRes(r.response.result));
-  }
-
-  async function initSchema() {
-    await exec(`CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, content TEXT NOT NULL DEFAULT '', msg_type TEXT NOT NULL DEFAULT 'text', reply_to INTEGER, reactions TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL DEFAULT (datetime('now')), edited_at TEXT, is_deleted INTEGER NOT NULL DEFAULT 0)`);
-    await exec('CREATE TABLE IF NOT EXISTS presence (name TEXT PRIMARY KEY, is_online INTEGER NOT NULL DEFAULT 0, is_typing INTEGER NOT NULL DEFAULT 0, last_seen TEXT)');
-    await exec('CREATE TABLE IF NOT EXISTS read_state (name TEXT PRIMARY KEY, last_read_id INTEGER NOT NULL DEFAULT 0)');
-    await exec('CREATE INDEX IF NOT EXISTS idx_messages_id ON messages(id)');
-    await exec('CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(sender)');
-  }
+  const supabase = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
+  let presenceChannel = null;
 
   function formatTime(iso) {
     if (!iso) return '';
-    const d = new Date(iso + (iso.endsWith('Z') ? '' : 'Z').replace(' ', 'T'));
-    if (isNaN(d.getTime())) {
-      const parts = iso.split(/[-: ]/);
-      if (parts.length >= 5) return parts[3] + ':' + parts[4];
-      return '';
-    }
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
     const h = d.getHours(), m = d.getMinutes();
     const ampm = h >= 12 ? 'PM' : 'AM';
     const h12 = h % 12 || 12;
@@ -176,7 +93,6 @@
     if (msg.is_deleted) {
       return '<div class="message-bubble" style="font-style:italic;opacity:0.6">Message deleted</div>';
     }
-
     let replyHTML = '';
     if (msg.reply_to) {
       const parent = state.msgMap.get(msg.reply_to);
@@ -184,14 +100,12 @@
         replyHTML = '<div class="reply-preview"><span class="reply-preview-sender">' + escapeHtml(parent.sender) + '</span><span class="reply-preview-content">' + escapeHtml(parent.content.substring(0, 80)) + '</span></div>';
       }
     }
-
     let contentHTML = '';
     if (msg.msg_type === 'image') {
       contentHTML = '<img src="' + msg.content + '" class="message-image" loading="lazy">';
     } else if (msg.content) {
       contentHTML = renderMarkdown(msg.content);
     }
-
     let reactionsHTML = '';
     if (msg.reactions) {
       try {
@@ -202,11 +116,9 @@
         }
       } catch (e) {}
     }
-
     const timeStr = formatTime(msg.created_at);
     const isSelf = msg.sender === MY_NAME;
     const edited = msg.edited_at ? ' <span style="font-size:10px;opacity:0.5">edited</span>' : '';
-
     return '<div class="message-bubble">'
       + replyHTML
       + contentHTML
@@ -303,84 +215,118 @@
     els.statusText.textContent = online ? 'online' : 'offline';
   }
 
-  async function doCombinedPoll() {
-    if (!state.tabVisible) return;
-    try {
-      const stmts = [
-        { sql: 'SELECT * FROM messages WHERE id > ? AND sender = ? ORDER BY id ASC', args: [state.lastKnownId, FRIEND] },
-        { sql: `UPDATE presence SET is_online = 1, last_seen = datetime('now') WHERE name = ?`, args: [MY_NAME] },
-        { sql: 'SELECT * FROM presence WHERE name = ?', args: [FRIEND] },
-        { sql: 'SELECT last_read_id FROM read_state WHERE name = ?', args: [FRIEND] },
-      ];
-      const results = await execBatch(stmts);
-      const newMsgs = results[0];
-      const hbResult = results[1];
-      const presenceData = results[2];
-      const readData = results[3];
+  async function signInAnonymously() {
+    const { data: { session } } = await supabase.auth.signInAnonymously();
+    return session;
+  }
 
-      if (!MY_NAME) return;
-      if (hbResult.affected_row_count === 0) {
-        await exec(`INSERT OR REPLACE INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime('now'))`, [MY_NAME]);
-      }
+  function setupRealtime() {
+    presenceChannel = supabase.channel('chat');
 
-      if (newMsgs.rows.length > 0) {
-        for (const row of newMsgs.rows) {
-          row.read = false;
-          row._optimistic = false;
-          state.messages.push(row);
-          state.msgMap.set(row.id, row);
-          state.lastKnownId = Math.max(state.lastKnownId, row.id);
-        }
-        batchRender(newMsgs.rows);
-        if (state.isAtBottom) {
-          scrollToBottom(true);
-        } else {
-          state.unreadCount += newMsgs.rows.length;
-          updateUnreadCount();
-          showToast();
-        }
-      }
-
-      if (presenceData.rows.length > 0) {
-        const p = presenceData.rows[0];
-        const isOnline = p.is_online == 1;
-        let online = false;
-        if (isOnline && p.last_seen) {
-          const last = new Date(p.last_seen + 'Z');
-          online = (Date.now() - last.getTime()) < ONLINE_WINDOW_MS;
-        }
-        updateStatus(online);
-        if (p.is_typing == 1 && online) showTyping(FRIEND);
-        else hideTyping();
-      } else {
-        updateStatus(false);
-        hideTyping();
-      }
-
-      if (readData.rows.length > 0) {
-        const friendLastRead = readData.rows[0].last_read_id || 0;
-        let changed = false;
-        for (const msg of state.messages) {
-          if (msg.sender === MY_NAME && !msg.read && msg.id > 0 && msg.id <= friendLastRead) {
-            msg.read = true;
-            changed = true;
-          }
-        }
-        if (changed) {
-          for (const msg of state.messages) {
-            if (msg.sender === MY_NAME && msg.read) {
-              const el = q('[data-id="' + msg.id + '"]');
-              if (el) {
-                const st = el.querySelector('.message-status');
-                if (st) { st.className = 'message-status read'; st.textContent = '✓✓'; }
-              }
+    presenceChannel
+      .on('presence', { event: 'sync' }, () => {
+        const presences = presenceChannel.presenceState();
+        let friendOnline = false;
+        let friendTyping = false;
+        for (const key of Object.keys(presences)) {
+          for (const p of presences[key]) {
+            if (p.name === FRIEND) {
+              friendOnline = true;
+              if (p.is_typing) friendTyping = true;
             }
           }
         }
+        updateStatus(friendOnline);
+        if (friendTyping && friendOnline) showTyping(FRIEND);
+        else hideTyping();
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          await presenceChannel.track({
+            name: MY_NAME,
+            is_typing: false,
+            online: true,
+          });
+        }
+      });
+
+    supabase
+      .channel('messages-insert')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
+        const msg = payload.new;
+        if (msg.sender === FRIEND && msg.id > state.lastKnownId) {
+          msg.reactions = typeof msg.reactions === 'string' ? msg.reactions : JSON.stringify(msg.reactions);
+          state.messages.push(msg);
+          state.msgMap.set(msg.id, msg);
+          state.lastKnownId = Math.max(state.lastKnownId, msg.id);
+          renderMessage(msg);
+          if (state.isAtBottom) {
+            scrollToBottom(true);
+          } else {
+            state.unreadCount++;
+            updateUnreadCount();
+            showToast();
+          }
+        }
+      })
+      .subscribe();
+
+    supabase
+      .channel('read-state-updates')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'read_state', filter: 'name=eq.' + FRIEND }, (payload) => {
+        const friendLastRead = payload.new.last_read_id || 0;
+        updateReadStatus(friendLastRead);
+      })
+      .subscribe();
+  }
+
+  function updateReadStatus(friendLastRead) {
+    let changed = false;
+    for (const msg of state.messages) {
+      if (msg.sender === MY_NAME && !msg.read && msg.id > 0 && msg.id <= friendLastRead) {
+        msg.read = true;
+        changed = true;
       }
-    } catch (e) {
-      console.error('Combined poll error:', e);
     }
+    if (changed) {
+      for (const msg of state.messages) {
+        if (msg.sender === MY_NAME && msg.read) {
+          const el = q('[data-id="' + msg.id + '"]');
+          if (el) {
+            const st = el.querySelector('.message-status');
+            if (st) { st.className = 'message-status read'; st.textContent = '✓✓'; }
+          }
+        }
+      }
+    }
+  }
+
+  async function loadInitialMessages() {
+    const { data, error } = await supabase
+      .from('messages')
+      .select('*')
+      .order('id', { ascending: false })
+      .limit(PAGE_SIZE);
+    if (error) throw error;
+    const rows = (data || []).reverse();
+    rows.forEach(row => {
+      row.read = false;
+      row._optimistic = false;
+      row.reactions = typeof row.reactions === 'string' ? row.reactions : JSON.stringify(row.reactions);
+      state.messages.push(row);
+      state.msgMap.set(row.id, row);
+      if (row.id > state.lastKnownId && row.sender === FRIEND) state.lastKnownId = row.id;
+    });
+    batchRender(rows);
+    state.hasMore = rows.length >= PAGE_SIZE;
+    scrollToBottom(false);
+
+    const { data: rd } = await supabase
+      .from('read_state')
+      .select('last_read_id')
+      .eq('name', FRIEND)
+      .maybeSingle();
+    if (rd) updateReadStatus(rd.last_read_id);
   }
 
   async function fetchOlderMessages() {
@@ -388,13 +334,20 @@
     state.loadingMore = true;
     try {
       const oldest = state.messages.length > 0 ? state.messages[0].id : 9999999;
-      const result = await exec('SELECT * FROM messages WHERE id < ? ORDER BY id DESC LIMIT ?', [oldest, PAGE_SIZE]);
-      const rows = result.rows.reverse();
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .lt('id', oldest)
+        .order('id', { ascending: false })
+        .limit(PAGE_SIZE);
+      if (error) throw error;
+      const rows = (data || []).reverse();
       if (rows.length < PAGE_SIZE) state.hasMore = false;
       if (rows.length === 0) { state.loadingMore = false; return; }
       for (const row of rows) {
         row.read = false;
         row._optimistic = false;
+        row.reactions = typeof row.reactions === 'string' ? row.reactions : JSON.stringify(row.reactions);
         state.messages.unshift(row);
         state.msgMap.set(row.id, row);
       }
@@ -421,8 +374,8 @@
       id: tempId, sender: MY_NAME, content: content || '',
       msg_type: msgType || 'text', reply_to: replyToId,
       reactions: '{}',
-      created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
-      edited_at: null, is_deleted: 0, _optimistic: true, read: false,
+      created_at: new Date().toISOString(),
+      edited_at: null, is_deleted: false, _optimistic: true, read: false,
     };
     state.messages.push(optimistic);
     state.msgMap.set(tempId, optimistic);
@@ -435,20 +388,26 @@
     els.sendBtn.style.opacity = '0.4';
 
     try {
-      const result = await exec('INSERT INTO messages (sender, content, msg_type, reply_to, reactions) VALUES (?, ?, ?, ?, ?)', [
-        MY_NAME, content || '', msgType || 'text', replyToId, '{}',
-      ]);
-      const realIdVal = result.last_insert_rowid;
-      if (realIdVal) {
-        const idx = state.messages.findIndex(m => m.id === tempId);
-        if (idx !== -1) {
-          state.messages[idx].id = realIdVal;
-          state.msgMap.set(realIdVal, state.messages[idx]);
-          state.msgMap.delete(tempId);
-          state.messages[idx]._optimistic = false;
-          const el = q('[data-id="' + tempId + '"]');
-          if (el) { el.dataset.id = realIdVal; updateMsgEl(el, state.messages[idx]); }
-        }
+      const { data, error } = await supabase
+        .from('messages')
+        .insert({
+          sender: MY_NAME,
+          content: content || '',
+          msg_type: msgType || 'text',
+          reply_to: replyToId && replyToId > 0 ? replyToId : null,
+          reactions: {},
+        })
+        .select();
+      if (error) throw error;
+      const realId = data[0].id;
+      const idx = state.messages.findIndex(m => m.id === tempId);
+      if (idx !== -1) {
+        state.messages[idx].id = realId;
+        state.msgMap.set(realId, state.messages[idx]);
+        state.msgMap.delete(tempId);
+        state.messages[idx]._optimistic = false;
+        const el = q('[data-id="' + tempId + '"]');
+        if (el) { el.dataset.id = realId; updateMsgEl(el, state.messages[idx]); }
       }
       await checkDecay();
     } catch (e) {
@@ -467,10 +426,19 @@
 
   async function checkDecay() {
     try {
-      const countResult = await exec('SELECT COUNT(*) as cnt FROM messages');
-      const count = countResult.rows[0]?.cnt || 0;
+      const { count, error } = await supabase
+        .from('messages')
+        .select('*', { count: 'exact', head: true });
+      if (error) throw error;
       if (count > MAX_MESSAGES) {
-        await exec('DELETE FROM messages WHERE id IN (SELECT id FROM messages ORDER BY id ASC LIMIT ?)', [DECAY_BATCH]);
+        const { data: oldest } = await supabase
+          .from('messages')
+          .select('id')
+          .order('id', { ascending: true })
+          .limit(DECAY_BATCH);
+        if (oldest && oldest.length > 0) {
+          await supabase.from('messages').delete().in('id', oldest.map(r => r.id));
+        }
         const deletedIds = state.messages.slice(0, DECAY_BATCH).map(m => m.id);
         state.messages.splice(0, DECAY_BATCH);
         deletedIds.forEach(id => {
@@ -484,7 +452,12 @@
 
   async function editMessage(id, newContent) {
     try {
-      await exec(`UPDATE messages SET content = ?, edited_at = datetime('now') WHERE id = ? AND sender = ?`, [newContent, id, MY_NAME]);
+      const { error } = await supabase
+        .from('messages')
+        .update({ content: newContent, edited_at: new Date().toISOString() })
+        .eq('id', id)
+        .eq('sender', MY_NAME);
+      if (error) throw error;
       const msg = state.msgMap.get(id);
       if (msg) {
         msg.content = newContent;
@@ -498,10 +471,15 @@
 
   async function deleteMessage(id) {
     try {
-      await exec('UPDATE messages SET is_deleted = 1 WHERE id = ? AND sender = ?', [id, MY_NAME]);
+      const { error } = await supabase
+        .from('messages')
+        .update({ is_deleted: true })
+        .eq('id', id)
+        .eq('sender', MY_NAME);
+      if (error) throw error;
       const msg = state.msgMap.get(id);
       if (msg) {
-        msg.is_deleted = 1;
+        msg.is_deleted = true;
         const el = q('[data-id="' + id + '"]');
         if (el) updateMsgEl(el, msg);
       }
@@ -510,10 +488,13 @@
 
   async function toggleReaction(msgId, emoji) {
     try {
-      const result = await exec('SELECT reactions FROM messages WHERE id = ?', [msgId]);
-      if (!result.rows.length) return;
-      let reactions = {};
-      try { reactions = JSON.parse(result.rows[0].reactions || '{}'); } catch (e) {}
+      const { data, error } = await supabase
+        .from('messages')
+        .select('reactions')
+        .eq('id', msgId)
+        .maybeSingle();
+      if (error || !data) return;
+      let reactions = data.reactions || {};
       const users = reactions[emoji] || [];
       const idx = users.indexOf(MY_NAME);
       if (idx > -1) {
@@ -523,11 +504,10 @@
       } else {
         reactions[emoji] = [...users, MY_NAME];
       }
-      const newReactions = JSON.stringify(reactions);
-      await exec('UPDATE messages SET reactions = ? WHERE id = ?', [newReactions, msgId]);
+      await supabase.from('messages').update({ reactions }).eq('id', msgId);
       const msg = state.msgMap.get(msgId);
       if (msg) {
-        msg.reactions = newReactions;
+        msg.reactions = JSON.stringify(reactions);
         const el = q('[data-id="' + msgId + '"]');
         if (el) updateMsgEl(el, msg);
       }
@@ -567,12 +547,6 @@
     });
   }
 
-  async function updateTyping(isTyping) {
-    try {
-      await exec(`UPDATE presence SET is_typing = ?, last_seen = datetime('now') WHERE name = ?`, [isTyping ? 1 : 0, MY_NAME]);
-    } catch (e) {}
-  }
-
   async function updateMyReadState() {
     if (state.messages.length === 0) return;
     let maxId = 0;
@@ -583,7 +557,9 @@
       state.lastReadId = maxId;
       localStorage.setItem('chat_lastReadId', String(maxId));
       try {
-        await exec('INSERT OR REPLACE INTO read_state (name, last_read_id) VALUES (?, ?)', [MY_NAME, maxId]);
+        await supabase
+          .from('read_state')
+          .upsert({ name: MY_NAME, last_read_id: maxId }, { onConflict: 'name' });
       } catch (e) {}
     }
   }
@@ -608,16 +584,6 @@
         updateMyReadState();
       }, 500);
     }
-  }
-
-  function startPolling() {
-    stopPolling();
-    doCombinedPoll();
-    state.pollTimer = setInterval(doCombinedPoll, POLL_MS);
-  }
-
-  function stopPolling() {
-    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
   }
 
   function showFormatToolbar() {
@@ -732,32 +698,19 @@
 
   async function startApp() {
     try {
-      await initSchema();
+      await signInAnonymously();
     } catch (e) {
-      console.error('Schema init error:', e);
-      els.msgList.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger)">Database connection failed. Check your Turso credentials in config.js</div>';
-      return;
+      console.error('Auth error:', e);
     }
     try {
-      const result = await exec('SELECT * FROM messages ORDER BY id DESC LIMIT ?', [PAGE_SIZE]);
-      const rows = result.rows.reverse();
-      rows.forEach(row => {
-        row.read = false;
-        row._optimistic = false;
-        state.messages.push(row);
-        state.msgMap.set(row.id, row);
-        if (row.id > state.lastKnownId && row.sender === FRIEND) state.lastKnownId = row.id;
-      });
-      batchRender(rows);
-      state.hasMore = rows.length >= PAGE_SIZE;
-      scrollToBottom(false);
-
-      await exec(`INSERT OR REPLACE INTO presence (name, is_online, is_typing, last_seen) VALUES (?, 1, 0, datetime('now'))`, [MY_NAME]);
-      await updateMyReadState();
+      setupRealtime();
+      await loadInitialMessages();
     } catch (e) {
       console.error('Load messages error:', e);
+      els.msgList.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger)">Database connection failed. Check your Supabase credentials in config.js</div>';
+      return;
     }
-    startPolling();
+    state.ready = true;
   }
 
   function setupEvents() {
@@ -783,9 +736,13 @@
       els.input.style.height = 'auto';
       els.input.style.height = Math.min(els.input.scrollHeight, 120) + 'px';
       clearTimeout(state.typingTimer);
-      updateTyping(true);
+      if (presenceChannel) {
+        presenceChannel.track({ name: MY_NAME, is_typing: true, online: true });
+      }
       state.typingTimer = setTimeout(() => {
-        updateTyping(false);
+        if (presenceChannel) {
+          presenceChannel.track({ name: MY_NAME, is_typing: false, online: true });
+        }
       }, TYPING_IDLE_MS);
     });
 
@@ -871,10 +828,8 @@
         if (msgId) toggleReaction(msgId, badge.dataset.emoji);
         return;
       }
-
       const img = e.target.closest('.message-image');
       if (img) { window.open(img.src); return; }
-
       const btn = e.target.closest('button');
       if (!btn) { els.reactionPicker.classList.add('hidden'); return; }
       const msgEl = e.target.closest('.message');
@@ -911,12 +866,10 @@
     });
 
     document.addEventListener('visibilitychange', () => {
-      state.tabVisible = !document.hidden;
-      if (state.tabVisible) {
-        startPolling();
-        doCombinedPoll();
-      } else {
-        stopPolling();
+      if (document.hidden && presenceChannel) {
+        presenceChannel.track({ name: MY_NAME, is_typing: false, online: false });
+      } else if (!document.hidden && presenceChannel) {
+        presenceChannel.track({ name: MY_NAME, is_typing: false, online: true });
       }
     });
   }
