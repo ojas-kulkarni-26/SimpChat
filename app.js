@@ -28,6 +28,7 @@
     unreadCount: 0,
     isSending: false,
     ready: false,
+    pollTimer: null,
   };
 
   const els = {};
@@ -48,6 +49,7 @@
     els.typingIndicator = q('#typing-indicator');
     els.typingText = q('#typing-text');
     els.newMsgToast = q('#new-msg-toast');
+    els.scrollBottomBtn = q('#scroll-bottom-btn');
     els.replyBar = q('#reply-bar');
     els.replySender = q('#reply-sender');
     els.replyContent = q('#reply-content');
@@ -102,7 +104,7 @@
     }
     let contentHTML = '';
     if (msg.msg_type === 'image') {
-      contentHTML = '<img src="' + msg.content + '" class="message-image" loading="lazy">';
+      contentHTML = '<img src="' + msg.content + '" class="message-image" loading="lazy" alt="Image shared by ' + escapeHtml(msg.sender) + '">';
     } else if (msg.content) {
       contentHTML = renderMarkdown(msg.content);
     }
@@ -112,7 +114,7 @@
         const r = typeof msg.reactions === 'string' ? JSON.parse(msg.reactions) : msg.reactions;
         const entries = Object.entries(r);
         if (entries.length > 0) {
-          reactionsHTML = '<div class="reactions-bar">' + entries.map(([emoji, users]) => '<span class="reaction-badge" data-emoji="' + escapeHtml(emoji) + '">' + emoji + '</span>').join('') + '</div>';
+          reactionsHTML = '<div class="reactions-bar">' + entries.map(([emoji, users]) => '<span class="reaction-badge" data-emoji="' + escapeHtml(emoji) + '" role="button" tabindex="0" aria-label="' + escapeHtml(emoji) + ' reaction">' + emoji + '</span>').join('') + '</div>';
         }
       } catch (e) {}
     }
@@ -136,13 +138,22 @@
     div.className = 'message ' + (isSelf ? 'self' : 'friend');
     div.dataset.id = msg.id;
     div.dataset.sender = msg.sender;
-    div.innerHTML = '<div class="message-actions">'
-      + '<button class="action-reply" title="Reply">↩️</button>'
-      + '<button class="action-react" title="React">😊</button>'
-      + (isSelf ? '<button class="action-edit own-only" title="Edit">✏️</button><button class="action-delete own-only" title="Delete">🗑️</button>' : '')
+    div.innerHTML = '<div class="message-actions" role="toolbar" aria-label="Message actions">'
+      + '<button class="action-reply" title="Reply" aria-label="Reply to message">↩️</button>'
+      + '<button class="action-react" title="React" aria-label="React to message">😊</button>'
+      + (isSelf ? '<button class="action-edit own-only" title="Edit" aria-label="Edit message">✏️</button><button class="action-delete own-only" title="Delete" aria-label="Delete message">🗑️</button>' : '')
       + '</div>'
       + msgBubbleHTML(msg);
     div._msg = msg;
+    const bubble = div.querySelector('.message-bubble');
+    if (bubble) {
+      bubble.addEventListener('click', function (e) {
+        if (window.innerWidth <= 480) {
+          const actions = div.querySelector('.message-actions');
+          if (actions) { actions.classList.toggle('show'); }
+        }
+      });
+    }
     return div;
   }
 
@@ -188,11 +199,17 @@
     });
     state.isAtBottom = true;
     hideToast();
+    updateScrollBtn();
   }
 
   function isNearBottom() {
     const c = els.msgContainer;
-    return c.scrollHeight - c.scrollTop - c.clientHeight < 80;
+    return c.scrollHeight - c.scrollTop - c.clientHeight < 100;
+  }
+
+  function updateScrollBtn() {
+    if (!els.scrollBottomBtn) return;
+    els.scrollBottomBtn.classList.toggle('show', !isNearBottom());
   }
 
   function showToast() { els.newMsgToast.classList.remove('hidden'); }
@@ -228,11 +245,12 @@
         const presences = presenceChannel.presenceState();
         let friendOnline = false;
         let friendTyping = false;
+        const now = Date.now();
         for (const key of Object.keys(presences)) {
           for (const p of presences[key]) {
             if (p.name === FRIEND) {
               friendOnline = true;
-              if (p.is_typing) friendTyping = true;
+              if (p.last_typing && now - p.last_typing < 4000) friendTyping = true;
             }
           }
         }
@@ -244,7 +262,7 @@
         if (status === 'SUBSCRIBED') {
           await presenceChannel.track({
             name: MY_NAME,
-            is_typing: false,
+            last_typing: 0,
             online: true,
           });
         }
@@ -299,6 +317,41 @@
         }
       }
     }
+  }
+
+  async function pollNewMessages() {
+    if (!MY_NAME) return;
+    try {
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .gt('id', state.lastKnownId)
+        .eq('sender', FRIEND)
+        .order('id', { ascending: true });
+      if (error) throw error;
+      if (data && data.length > 0) {
+        for (const row of data) {
+          row.read = false;
+          row._optimistic = false;
+          row.reactions = typeof row.reactions === 'string' ? row.reactions : JSON.stringify(row.reactions);
+          state.messages.push(row);
+          state.msgMap.set(row.id, row);
+          state.lastKnownId = Math.max(state.lastKnownId, row.id);
+          renderMessage(row);
+          if (state.isAtBottom) scrollToBottom(true);
+          else { state.unreadCount++; updateUnreadCount(); showToast(); }
+        }
+      }
+    } catch (e) { console.error('Poll error:', e); }
+  }
+
+  function startFallbackPoll() {
+    stopFallbackPoll();
+    state.pollTimer = setInterval(pollNewMessages, 15000);
+  }
+
+  function stopFallbackPoll() {
+    if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
   }
 
   async function loadInitialMessages() {
@@ -575,6 +628,7 @@
         updateUnreadCount();
       }
     }
+    updateScrollBtn();
     if (els.msgContainer.scrollTop < 50 && state.hasMore) {
       fetchOlderMessages();
     }
@@ -591,10 +645,14 @@
     if (document.activeElement === ta && ta.selectionStart !== ta.selectionEnd) {
       const rect = ta.getBoundingClientRect();
       const tbar = els.formatToolbar;
-      const left = Math.max(8, rect.left + rect.width / 2 - tbar.offsetWidth / 2);
-      const top = rect.top - tbar.offsetHeight - 8;
+      let left = Math.max(8, rect.left + rect.width / 2 - tbar.offsetWidth / 2);
+      let top = rect.top - tbar.offsetHeight - 8;
+      if (top < 8) top = rect.bottom + 8;
+      if (left + tbar.offsetWidth > window.innerWidth - 8) {
+        left = window.innerWidth - tbar.offsetWidth - 8;
+      }
       tbar.style.left = left + 'px';
-      tbar.style.top = (top > 0 ? top : rect.bottom + 8) + 'px';
+      tbar.style.top = top + 'px';
       tbar.classList.remove('hidden');
     } else {
       els.formatToolbar.classList.add('hidden');
@@ -655,6 +713,23 @@
     }
   }
 
+  function positionPicker(btn) {
+    const rect = btn.getBoundingClientRect();
+    const picker = els.reactionPicker;
+    const padding = 8;
+    const pickerW = picker.offsetWidth || 260;
+    const pickerH = picker.offsetHeight || 56;
+    let left = rect.left + rect.width / 2 - pickerW / 2;
+    let top = rect.top - pickerH - 8;
+    if (left < padding) left = padding;
+    if (left + pickerW > window.innerWidth - padding) {
+      left = window.innerWidth - pickerW - padding;
+    }
+    if (top < padding) top = rect.bottom + 8;
+    picker.style.left = left + 'px';
+    picker.style.top = top + 'px';
+  }
+
   async function init() {
     cacheEls();
     parseArgs();
@@ -710,6 +785,7 @@
       els.msgList.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger)">Database connection failed. Check your Supabase credentials in config.js</div>';
       return;
     }
+    startFallbackPoll();
     state.ready = true;
   }
 
@@ -730,6 +806,15 @@
       updateUnreadCount();
     });
 
+    els.newMsgToast.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); els.newMsgToast.click(); }
+    });
+
+    els.scrollBottomBtn.addEventListener('click', () => scrollToBottom(true));
+    els.scrollBottomBtn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); scrollToBottom(true); }
+    });
+
     els.replyClose.addEventListener('click', clearReply);
 
     els.input.addEventListener('input', () => {
@@ -737,11 +822,11 @@
       els.input.style.height = Math.min(els.input.scrollHeight, 120) + 'px';
       clearTimeout(state.typingTimer);
       if (presenceChannel) {
-        presenceChannel.track({ name: MY_NAME, is_typing: true, online: true });
+        presenceChannel.track({ name: MY_NAME, last_typing: Date.now(), online: true });
       }
       state.typingTimer = setTimeout(() => {
         if (presenceChannel) {
-          presenceChannel.track({ name: MY_NAME, is_typing: false, online: true });
+          presenceChannel.track({ name: MY_NAME, last_typing: 0, online: true });
         }
       }, TYPING_IDLE_MS);
     });
@@ -763,6 +848,7 @@
       if (e.key === 'Escape') {
         clearReply();
         state.editId = null;
+        els.input.blur();
       }
     });
 
@@ -774,6 +860,9 @@
       }
       if (!els.reactionPicker.contains(e.target) && !e.target.closest('.action-react')) {
         els.reactionPicker.classList.add('hidden');
+      }
+      if (!e.target.closest('.message-actions')) {
+        document.querySelectorAll('.message-actions.show').forEach(el => el.classList.remove('show'));
       }
     });
 
@@ -842,9 +931,7 @@
         setReply(msgId, msg.sender, msg.is_deleted ? '[deleted]' : msg.content);
       }
       if (btn.classList.contains('action-react')) {
-        const rect = btn.getBoundingClientRect();
-        els.reactionPicker.style.left = Math.max(4, rect.left + rect.width / 2 - 120) + 'px';
-        els.reactionPicker.style.top = (rect.top - 52) + 'px';
+        positionPicker(btn);
         els.reactionPicker.dataset.msgId = msgId;
         els.reactionPicker.classList.remove('hidden');
       }
@@ -865,11 +952,18 @@
       els.reactionPicker.classList.add('hidden');
     });
 
+    els.reactionPicker.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') els.reactionPicker.classList.add('hidden');
+    });
+
     document.addEventListener('visibilitychange', () => {
       if (document.hidden && presenceChannel) {
-        presenceChannel.track({ name: MY_NAME, is_typing: false, online: false });
+        presenceChannel.track({ name: MY_NAME, last_typing: 0, online: false });
+        stopFallbackPoll();
       } else if (!document.hidden && presenceChannel) {
-        presenceChannel.track({ name: MY_NAME, is_typing: false, online: true });
+        presenceChannel.track({ name: MY_NAME, last_typing: 0, online: true });
+        startFallbackPoll();
+        pollNewMessages();
       }
     });
   }
