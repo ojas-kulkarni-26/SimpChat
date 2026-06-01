@@ -9,7 +9,7 @@
   const SELF = localStorage.getItem('chat_self_name');
   const FRIEND = CONFIG.FRIEND_NAME;
   let MY_NAME = SELF;
-  const POLL_MS = 10000;
+  const POLL_MS = 1500;
   const TYPING_IDLE_MS = 3000;
   const MAX_MESSAGES = 1000;
   const DECAY_BATCH = 100;
