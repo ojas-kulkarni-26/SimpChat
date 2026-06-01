@@ -3,22 +3,33 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>Chat</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,400,50;9..144,500,50;9..144,600,50&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
-  <script src="config.js"></script>
+  <link rel="stylesheet" href="style.css?v=2">
+  <script src="config.js?v=2"></script>
 </head>
 <body>
   <div id="name-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
     <div class="modal-backdrop"></div>
     <div class="modal-box">
-      <h1 id="modal-title">Welcome</h1>
-      <p>Enter your name to start chatting</p>
-      <div class="modal-input-row">
-        <input type="text" id="name-input" placeholder="Your name" maxlength="30" autocomplete="off" aria-label="Your name">
-        <button id="name-submit" aria-label="Join chat">Join</button>
+      <h1 id="modal-title">Who are you?</h1>
+      <p>Select your identity to start chatting</p>
+      <div class="identity-buttons">
+        <button id="btn-arnav" class="identity-btn">Arnav</button>
+        <button id="btn-ojas" class="identity-btn">Ojas</button>
+      </div>
+      <div id="password-group" class="hidden">
+        <p>Enter password for Ojas</p>
+        <div class="modal-input-row">
+          <input type="password" id="password-input" placeholder="Password" autocomplete="off" aria-label="Password">
+          <button id="password-submit" aria-label="Verify">Verify</button>
+        </div>
+        <span id="password-error" class="error-text hidden">Incorrect password</span>
       </div>
     </div>
   </div>
@@ -35,6 +46,7 @@
         </div>
       </div>
       <div class="header-right">
+        <button id="clear-chat-btn" class="icon-btn" title="Clear all messages" aria-label="Clear all messages" style="display:none">🗑️</button>
         <button id="theme-toggle" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">🌙</button>
       </div>
     </header>
@@ -89,6 +101,6 @@
   <input type="file" id="image-upload" accept="image/*" hidden aria-hidden="true">
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=2"></script>
 </body>
 </html>

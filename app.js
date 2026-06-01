@@ -6,13 +6,16 @@
     return;
   }
 
-  const SELF = localStorage.getItem('chat_self_name');
-  const FRIEND = CONFIG.FRIEND_NAME;
-  let MY_NAME = SELF;
+  let MY_NAME = null;
+  let FRIEND = null;
   const TYPING_IDLE_MS = 3000;
   const MAX_MESSAGES = 1000;
   const DECAY_BATCH = 100;
   const PAGE_SIZE = 50;
+
+  let tempIdCounter = 0;
+  let reactingIds = new Set();
+  let readStateThrottle = null;
 
   let state = {
     messages: [],
@@ -38,12 +41,17 @@
   function cacheEls() {
     els.app = q('#app');
     els.nameModal = q('#name-modal');
-    els.nameInput = q('#name-input');
-    els.nameSubmit = q('#name-submit');
+    els.btnArnav = q('#btn-arnav');
+    els.btnOjas = q('#btn-ojas');
+    els.passwordGroup = q('#password-group');
+    els.passwordInput = q('#password-input');
+    els.passwordSubmit = q('#password-submit');
+    els.passwordError = q('#password-error');
     els.friendName = q('#friend-name');
     els.statusDot = q('#status-dot');
     els.statusText = q('#status-text');
     els.themeToggle = q('#theme-toggle');
+    els.clearChatBtn = q('#clear-chat-btn');
     els.msgContainer = q('#messages-container');
     els.msgList = q('#messages-list');
     els.typingIndicator = q('#typing-indicator');
@@ -73,6 +81,29 @@
     const ampm = h >= 12 ? 'PM' : 'AM';
     const h12 = h % 12 || 12;
     return h12 + ':' + String(m).padStart(2, '0') + ' ' + ampm;
+  }
+
+  function formatDate(iso) {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
+    const today = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    if (d.toDateString() === today.toDateString()) return 'Today';
+    if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: d.getFullYear() !== today.getFullYear() ? 'numeric' : undefined });
+  }
+
+  function isSameDay(a, b) {
+    if (!a || !b) return false;
+    return new Date(a).toDateString() === new Date(b).toDateString();
+  }
+
+  function createDateSeparator(iso) {
+    const div = document.createElement('div');
+    div.className = 'date-separator';
+    div.innerHTML = '<span>' + formatDate(iso) + '</span>';
+    return div;
   }
 
   function escapeHtml(text) {
@@ -114,7 +145,11 @@
         const r = typeof msg.reactions === 'string' ? JSON.parse(msg.reactions) : msg.reactions;
         const entries = Object.entries(r);
         if (entries.length > 0) {
-          reactionsHTML = '<div class="reactions-bar">' + entries.map(([emoji, users]) => '<span class="reaction-badge" data-emoji="' + escapeHtml(emoji) + '" role="button" tabindex="0" aria-label="' + escapeHtml(emoji) + ' reaction">' + emoji + '</span>').join('') + '</div>';
+          reactionsHTML = '<div class="reactions-bar">' + entries.map(([emoji, users]) => {
+            const count = users.length;
+            const names = users.join(', ');
+            return '<span class="reaction-badge" data-emoji="' + escapeHtml(emoji) + '" role="button" tabindex="0" aria-label="' + escapeHtml(emoji) + ' by ' + escapeHtml(names) + '">' + emoji + (count > 1 ? '<span class="reaction-count">' + count + '</span>' : '') + '</span>';
+          }).join('') + '</div>';
         }
       } catch (e) {}
     }
@@ -163,13 +198,32 @@
     return newEl;
   }
 
+  function maybeInsertDateSep(prevMsg, nextMsg, parent, beforeEl) {
+    if (prevMsg && nextMsg && !isSameDay(prevMsg.created_at, nextMsg.created_at)) {
+      const sep = createDateSeparator(nextMsg.created_at);
+      parent.insertBefore(sep, beforeEl);
+    }
+  }
+
   function renderMessage(msg, prepend) {
     const existing = q('[data-id="' + msg.id + '"]');
     if (existing) return updateMsgEl(existing, msg);
     const el = createMsgEl(msg);
     if (prepend && els.msgList.firstChild) {
+      let firstMsgEl = els.msgList.firstChild;
+      while (firstMsgEl && firstMsgEl.classList && firstMsgEl.classList.contains('date-separator')) {
+        firstMsgEl = firstMsgEl.nextElementSibling;
+      }
+      const firstMsg = firstMsgEl && firstMsgEl._msg;
+      maybeInsertDateSep(msg, firstMsg, els.msgList, firstMsgEl);
       els.msgList.insertBefore(el, els.msgList.firstChild);
     } else {
+      let lastMsgEl = els.msgList.lastChild;
+      while (lastMsgEl && lastMsgEl.classList && lastMsgEl.classList.contains('date-separator')) {
+        lastMsgEl = lastMsgEl.previousElementSibling;
+      }
+      const lastMsg = lastMsgEl && lastMsgEl._msg ? lastMsgEl._msg : null;
+      maybeInsertDateSep(lastMsg, msg, els.msgList, null);
       els.msgList.appendChild(el);
     }
     return el;
@@ -177,17 +231,33 @@
 
   function batchRender(messages, prepend) {
     const frag = document.createDocumentFragment();
-    let count = 0;
+    let prevMsg = null;
     messages.forEach(msg => {
       if (!q('[data-id="' + msg.id + '"]')) {
+        if (prevMsg && !isSameDay(prevMsg.created_at, msg.created_at)) {
+          frag.appendChild(createDateSeparator(msg.created_at));
+        }
         frag.appendChild(createMsgEl(msg));
-        count++;
+        prevMsg = msg;
       }
     });
-    if (count === 0) return;
+    if (frag.childNodes.length === 0) return;
     if (prepend && els.msgList.firstChild) {
+      let firstMsgEl = els.msgList.firstChild;
+      while (firstMsgEl && firstMsgEl.classList && firstMsgEl.classList.contains('date-separator')) {
+        firstMsgEl = firstMsgEl.nextElementSibling;
+      }
+      const firstMsg = firstMsgEl && firstMsgEl._msg;
+      if (firstMsg && prevMsg && !isSameDay(prevMsg.created_at, firstMsg.created_at)) {
+        els.msgList.insertBefore(createDateSeparator(firstMsg.created_at), firstMsgEl);
+      }
       els.msgList.insertBefore(frag, els.msgList.firstChild);
     } else {
+      const lastChild = els.msgList.lastChild;
+      const lastMsg = (lastChild && lastChild._msg) || null;
+      if (lastMsg && messages.length > 0 && !isSameDay(lastMsg.created_at, messages[0].created_at)) {
+        els.msgList.appendChild(createDateSeparator(messages[0].created_at));
+      }
       els.msgList.appendChild(frag);
     }
   }
@@ -230,11 +300,6 @@
   function updateStatus(online) {
     els.statusDot.className = 'status-dot' + (online ? ' online' : '');
     els.statusText.textContent = online ? 'online' : 'offline';
-  }
-
-  async function signInAnonymously() {
-    const { data: { session } } = await supabase.auth.signInAnonymously();
-    return session;
   }
 
   function setupRealtime() {
@@ -296,27 +361,49 @@
         updateReadStatus(friendLastRead);
       })
       .subscribe();
+
+    supabase
+      .channel('messages-changes')
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'messages' }, (payload) => {
+        const msg = payload.new;
+        const existing = state.msgMap.get(msg.id);
+        if (existing) {
+          existing.content = msg.content;
+          existing.edited_at = msg.edited_at;
+          existing.is_deleted = msg.is_deleted;
+          existing.reactions = typeof msg.reactions === 'string' ? msg.reactions : JSON.stringify(msg.reactions);
+          const el = q('[data-id="' + msg.id + '"]');
+          if (el) updateMsgEl(el, existing);
+        }
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'messages' }, (payload) => {
+        const oldId = payload.old.id;
+        const idx = state.messages.findIndex(m => m.id === oldId);
+        if (idx !== -1) {
+          state.messages.splice(idx, 1);
+          state.msgMap.delete(oldId);
+          const el = q('[data-id="' + oldId + '"]');
+          if (el) el.remove();
+        }
+      })
+      .subscribe();
   }
 
+  let lastProcessedFriendRead = 0;
+
   function updateReadStatus(friendLastRead) {
-    let changed = false;
+    if (friendLastRead <= lastProcessedFriendRead) return;
     for (const msg of state.messages) {
-      if (msg.sender === MY_NAME && !msg.read && msg.id > 0 && msg.id <= friendLastRead) {
+      if (msg.sender === MY_NAME && !msg.read && msg.id > 0 && msg.id <= friendLastRead && msg.id > lastProcessedFriendRead) {
         msg.read = true;
-        changed = true;
-      }
-    }
-    if (changed) {
-      for (const msg of state.messages) {
-        if (msg.sender === MY_NAME && msg.read) {
-          const el = q('[data-id="' + msg.id + '"]');
-          if (el) {
-            const st = el.querySelector('.message-status');
-            if (st) { st.className = 'message-status read'; st.textContent = '✓✓'; }
-          }
+        const el = q('[data-id="' + msg.id + '"]');
+        if (el) {
+          const st = el.querySelector('.message-status');
+          if (st) { st.className = 'message-status read'; st.textContent = '✓✓'; }
         }
       }
     }
+    lastProcessedFriendRead = friendLastRead;
   }
 
   async function pollNewMessages() {
@@ -420,8 +507,12 @@
   async function sendMessage(content, msgType) {
     if (!content && msgType !== 'image') return;
     if (state.isSending) return;
+    if (msgType === 'text' && wordCount(content) > 3000) {
+      showNotification('Message exceeds 3000 word limit');
+      return;
+    }
     state.isSending = true;
-    const tempId = -Date.now();
+    const tempId = --tempIdCounter;
     const replyToId = state.replyTo ? state.replyTo.id : null;
     const optimistic = {
       id: tempId, sender: MY_NAME, content: content || '',
@@ -430,17 +521,17 @@
       created_at: new Date().toISOString(),
       edited_at: null, is_deleted: false, _optimistic: true, read: false,
     };
-    state.messages.push(optimistic);
-    state.msgMap.set(tempId, optimistic);
-    renderMessage(optimistic);
-    scrollToBottom(true);
-    clearReply();
-    els.input.value = '';
-    els.input.style.height = 'auto';
-    els.sendBtn.disabled = true;
-    els.sendBtn.style.opacity = '0.4';
-
     try {
+      state.messages.push(optimistic);
+      state.msgMap.set(tempId, optimistic);
+      renderMessage(optimistic);
+      scrollToBottom(true);
+      clearReply();
+      els.input.value = '';
+      els.input.style.height = 'auto';
+      els.sendBtn.disabled = true;
+      els.sendBtn.classList.add('sending');
+
       const { data, error } = await supabase
         .from('messages')
         .insert({
@@ -473,7 +564,7 @@
     } finally {
       state.isSending = false;
       els.sendBtn.disabled = false;
-      els.sendBtn.style.opacity = '1';
+      els.sendBtn.classList.remove('sending');
     }
   }
 
@@ -503,33 +594,58 @@
     } catch (e) { console.error('Decay error:', e); }
   }
 
+  async function clearAllMessages() {
+    if (MY_NAME !== 'Ojas') return;
+    if (!confirm('Delete ALL messages from the database? This cannot be undone.')) return;
+    try {
+      const { error } = await supabase.from('messages').delete().gt('id', 0);
+      if (error) throw error;
+      state.messages = [];
+      state.msgMap = new Map();
+      state.lastKnownId = 0;
+      els.msgList.innerHTML = '';
+      showNotification('Chat cleared');
+    } catch (e) {
+      console.error('Clear error:', e);
+      showNotification('Failed to clear chat');
+    }
+  }
+
   async function editMessage(id, newContent) {
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('messages')
         .update({ content: newContent, edited_at: new Date().toISOString() })
         .eq('id', id)
-        .eq('sender', MY_NAME);
+        .eq('sender', MY_NAME)
+        .select();
       if (error) throw error;
+      if (!data || data.length === 0) throw new Error('No rows updated');
+      state.editId = null;
+      els.input.value = '';
+      els.input.style.height = 'auto';
       const msg = state.msgMap.get(id);
       if (msg) {
         msg.content = newContent;
-        msg.edited_at = new Date().toISOString();
+        msg.edited_at = data[0].edited_at;
         const el = q('[data-id="' + id + '"]');
         if (el) updateMsgEl(el, msg);
       }
-      state.editId = null;
     } catch (e) { console.error('Edit error:', e); }
   }
 
   async function deleteMessage(id) {
     try {
-      const { error } = await supabase
+      const { data, error } = await supabase
         .from('messages')
         .update({ is_deleted: true })
         .eq('id', id)
-        .eq('sender', MY_NAME);
+        .eq('sender', MY_NAME)
+        .select();
       if (error) throw error;
+      if (!data || data.length === 0) throw new Error('No rows updated');
+      if (state.replyTo && state.replyTo.id === id) clearReply();
+      if (state.editId === id) { state.editId = null; els.input.value = ''; els.input.style.height = 'auto'; }
       const msg = state.msgMap.get(id);
       if (msg) {
         msg.is_deleted = true;
@@ -539,7 +655,25 @@
     } catch (e) { console.error('Delete error:', e); }
   }
 
+  function showNotification(msg) {
+    const old = q('#app-notification');
+    if (old) old.remove();
+    const div = document.createElement('div');
+    div.id = 'app-notification';
+    div.textContent = msg;
+    document.body.appendChild(div);
+    setTimeout(() => div.classList.add('show'), 10);
+    setTimeout(() => { div.classList.remove('show'); setTimeout(() => div.remove(), 300); }, 3000);
+  }
+
+  function wordCount(text) {
+    if (!text.trim()) return 0;
+    return text.trim().split(/\s+/).length;
+  }
+
   async function toggleReaction(msgId, emoji) {
+    if (reactingIds.has(msgId)) return;
+    reactingIds.add(msgId);
     try {
       const { data, error } = await supabase
         .from('messages')
@@ -565,12 +699,20 @@
         if (el) updateMsgEl(el, msg);
       }
     } catch (e) { console.error('Reaction error:', e); }
+    finally { reactingIds.delete(msgId); }
   }
 
   async function sendImage(file) {
     if (!file) return;
-    const img = await compressImage(file);
-    await sendMessage(img, 'image');
+    els.imageBtn.classList.add('uploading');
+    els.imageBtn.disabled = true;
+    try {
+      const img = await compressImage(file);
+      await sendMessage(img, 'image');
+    } finally {
+      els.imageBtn.classList.remove('uploading');
+      els.imageBtn.disabled = false;
+    }
   }
 
   function compressImage(file) {
@@ -616,8 +758,6 @@
       } catch (e) {}
     }
   }
-
-  let readStateThrottle = null;
 
   function onScroll() {
     state.isAtBottom = isNearBottom();
@@ -708,7 +848,6 @@
     const name = args.get('name');
     if (name) {
       MY_NAME = name.trim();
-      localStorage.setItem('chat_self_name', MY_NAME);
       window.history.replaceState({}, '', window.location.pathname);
     }
   }
@@ -730,53 +869,72 @@
     picker.style.top = top + 'px';
   }
 
+  function setIdentity(name) {
+    MY_NAME = name;
+    FRIEND = name === 'Arnav' ? 'Ojas' : 'Arnav';
+    els.friendName.textContent = FRIEND;
+    if (els.clearChatBtn) {
+      els.clearChatBtn.style.display = MY_NAME === 'Ojas' ? '' : 'none';
+    }
+  }
+
+  const MOON = '🌙', SUN = '☀️';
+
+  function applyTheme() {
+    const theme = localStorage.getItem('chat_theme') || 'dark';
+    document.documentElement.dataset.theme = theme;
+    els.themeToggle.textContent = theme === 'dark' ? MOON : SUN;
+  }
+
   async function init() {
     cacheEls();
     parseArgs();
-
-    const saved = localStorage.getItem('chat_self_name');
-    if (saved) {
-      MY_NAME = saved;
-      els.nameModal.classList.add('hidden');
-      els.app.classList.remove('hidden');
-    } else {
-      els.nameModal.classList.remove('hidden');
-      els.app.classList.add('hidden');
-      els.nameInput.focus();
-    }
-
-    const theme = localStorage.getItem('chat_theme') || 'dark';
-    document.documentElement.dataset.theme = theme;
-    els.themeToggle.textContent = theme === 'dark' ? '🌙' : '☀️';
-
-    els.friendName.textContent = FRIEND;
-
+    applyTheme();
     setupEvents();
 
-    if (saved) {
-      await startApp();
-    } else {
-      els.nameSubmit.addEventListener('click', onNameSubmit);
-      els.nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') onNameSubmit(); });
+    if (MY_NAME) {
+      setIdentity(MY_NAME);
+      els.nameModal.classList.add('hidden');
+      els.app.classList.remove('hidden');
+      startApp();
+      return;
     }
-  }
 
-  async function onNameSubmit() {
-    const name = els.nameInput.value.trim();
-    if (!name) return;
-    MY_NAME = name;
-    localStorage.setItem('chat_self_name', MY_NAME);
-    els.nameModal.classList.add('hidden');
-    els.app.classList.remove('hidden');
-    await startApp();
+    els.nameModal.classList.remove('hidden');
+    els.app.classList.add('hidden');
+
+    els.btnArnav.addEventListener('click', () => {
+      setIdentity('Arnav');
+      els.nameModal.classList.add('hidden');
+      els.app.classList.remove('hidden');
+      startApp();
+    });
+
+    els.btnOjas.addEventListener('click', () => {
+      els.passwordGroup.classList.remove('hidden');
+      els.passwordInput.focus();
+      els.passwordError.classList.add('hidden');
+    });
+
+    els.passwordSubmit.addEventListener('click', () => {
+      if (els.passwordInput.value === '4132') {
+        setIdentity('Ojas');
+        els.nameModal.classList.add('hidden');
+        els.app.classList.remove('hidden');
+        startApp();
+      } else {
+        els.passwordError.classList.remove('hidden');
+        els.passwordInput.value = '';
+        els.passwordInput.focus();
+      }
+    });
+
+    els.passwordInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') els.passwordSubmit.click();
+    });
   }
 
   async function startApp() {
-    try {
-      await signInAnonymously();
-    } catch (e) {
-      console.error('Auth error:', e);
-    }
     try {
       setupRealtime();
       await loadInitialMessages();
@@ -795,8 +953,10 @@
       const next = current === 'dark' ? 'light' : 'dark';
       document.documentElement.dataset.theme = next;
       localStorage.setItem('chat_theme', next);
-      els.themeToggle.textContent = next === 'dark' ? '🌙' : '☀️';
+      els.themeToggle.textContent = next === 'dark' ? MOON : SUN;
     });
+
+    els.clearChatBtn.addEventListener('click', clearAllMessages);
 
     els.msgContainer.addEventListener('scroll', onScroll, { passive: true });
 
@@ -838,9 +998,6 @@
         if (state.editId) {
           if (text) editMessage(state.editId, text);
           else deleteMessage(state.editId);
-          state.editId = null;
-          els.input.value = '';
-          els.input.style.height = 'auto';
         } else if (text) {
           sendMessage(text, 'text');
         }
@@ -848,6 +1005,8 @@
       if (e.key === 'Escape') {
         clearReply();
         state.editId = null;
+        els.input.value = '';
+        els.input.style.height = 'auto';
         els.input.blur();
       }
     });
@@ -870,9 +1029,7 @@
       const text = els.input.value.trim();
       if (state.editId) {
         if (text) editMessage(state.editId, text);
-        state.editId = null;
-        els.input.value = '';
-        els.input.style.height = 'auto';
+        else { state.editId = null; els.input.value = ''; els.input.style.height = 'auto'; }
       } else if (text) {
         sendMessage(text, 'text');
       }
@@ -928,7 +1085,7 @@
       if (!msg) return;
 
       if (btn.classList.contains('action-reply')) {
-        setReply(msgId, msg.sender, msg.is_deleted ? '[deleted]' : msg.content);
+        setReply(msgId, msg.sender, msg.is_deleted ? (msg.content || 'Message was deleted') : msg.content);
       }
       if (btn.classList.contains('action-react')) {
         positionPicker(btn);
