@@ -32,6 +32,7 @@
     isSending: false,
     ready: false,
     pollTimer: null,
+    notificationsEnabled: localStorage.getItem('chat_notifications') !== 'false',
   };
 
   const els = {};
@@ -51,6 +52,7 @@
     els.statusDot = q('#status-dot');
     els.statusText = q('#status-text');
     els.themeToggle = q('#theme-toggle');
+    els.notifToggle = q('#notif-toggle');
     els.clearChatBtn = q('#clear-chat-btn');
     els.msgContainer = q('#messages-container');
     els.msgList = q('#messages-list');
@@ -742,6 +744,70 @@
     });
   }
 
+  function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const rawData = window.atob(base64);
+    return Uint8Array.from([].map.call(rawData, function (ch) { return ch.charCodeAt(0); }));
+  }
+
+  async function setupPushNotifications() {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+    if (!CONFIG.VAPID_PUBLIC_KEY || CONFIG.VAPID_PUBLIC_KEY === 'REPLACE_ME') return;
+    if (!state.notificationsEnabled) return;
+    try {
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      await navigator.serviceWorker.ready;
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') return;
+      let subscription = await registration.pushManager.getSubscription();
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(CONFIG.VAPID_PUBLIC_KEY),
+        });
+      }
+      await supabase
+        .from('push_subscriptions')
+        .upsert(
+          { name: MY_NAME, subscription: subscription.toJSON(), updated_at: new Date().toISOString() },
+          { onConflict: 'name' }
+        );
+    } catch (e) {
+      console.error('Push setup error:', e);
+    }
+  }
+
+  async function disablePushNotifications() {
+    try {
+      const registration = await navigator.serviceWorker.ready;
+      const subscription = await registration.pushManager.getSubscription();
+      if (subscription) {
+        await subscription.unsubscribe();
+      }
+      await supabase.from('push_subscriptions').delete().eq('name', MY_NAME);
+    } catch (e) {
+      console.error('Disable push error:', e);
+    }
+  }
+
+  async function toggleNotifications() {
+    state.notificationsEnabled = !state.notificationsEnabled;
+    localStorage.setItem('chat_notifications', String(state.notificationsEnabled));
+    updateNotifToggleUI();
+    if (state.notificationsEnabled) {
+      await setupPushNotifications();
+    } else {
+      await disablePushNotifications();
+    }
+  }
+
+  function updateNotifToggleUI() {
+    if (!els.notifToggle) return;
+    els.notifToggle.textContent = state.notificationsEnabled ? '🔔' : '🔕';
+    els.notifToggle.title = state.notificationsEnabled ? 'Mute notifications' : 'Enable notifications';
+  }
+
   async function updateMyReadState() {
     if (state.messages.length === 0) return;
     let maxId = 0;
@@ -938,6 +1004,8 @@
     try {
       setupRealtime();
       await loadInitialMessages();
+      setupPushNotifications();
+      updateNotifToggleUI();
     } catch (e) {
       console.error('Load messages error:', e);
       els.msgList.innerHTML = '<div style="padding:20px;text-align:center;color:var(--danger)">Database connection failed. Check your Supabase credentials in config.js</div>';
@@ -955,6 +1023,8 @@
       localStorage.setItem('chat_theme', next);
       els.themeToggle.textContent = next === 'dark' ? MOON : SUN;
     });
+
+    els.notifToggle.addEventListener('click', toggleNotifications);
 
     els.clearChatBtn.addEventListener('click', clearAllMessages);
 

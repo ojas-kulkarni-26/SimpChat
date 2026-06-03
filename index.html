@@ -7,11 +7,12 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>SimpChat</title>
+  <link rel="manifest" href="/manifest.json">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,400,50;9..144,500,50;9..144,600,50&family=Manrope:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=3">
-  <script src="config.js?v=3"></script>
+  <link rel="stylesheet" href="style.css?v=4">
+  <script src="config.js?v=4"></script>
 </head>
 <body>
   <div id="name-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
@@ -46,6 +47,7 @@
         </div>
       </div>
       <div class="header-right">
+        <button id="notif-toggle" class="icon-btn" title="Enable notifications" aria-label="Toggle notifications">🔕</button>
         <button id="clear-chat-btn" class="icon-btn" title="Clear all messages" aria-label="Clear all messages" style="display:none">🗑️</button>
         <button id="theme-toggle" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">🌙</button>
       </div>
@@ -103,6 +105,6 @@
   <input type="file" id="image-upload" accept="image/*" hidden aria-hidden="true">
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="app.js?v=3"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>
