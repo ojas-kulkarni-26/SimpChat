@@ -49,8 +49,8 @@ serve(async (req) => {
     const payload = JSON.stringify({
       title: msg.sender,
       body: content.substring(0, 200),
-      icon: '/icon.svg',
-      badge: '/icon.svg',
+      icon: 'icon.svg',
+      badge: 'icon.svg',
       tag: 'simpchat-message',
       data: { url: `?name=${recipientName}` },
     })
