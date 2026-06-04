@@ -7,7 +7,7 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('push', (event) => {
-  let data = { title: 'SimpChat', body: '', icon: '/icon.svg', badge: '/icon.svg' };
+  let data = { title: 'SimpChat', body: '', icon: 'icon.svg', badge: 'icon.svg' };
   try {
     if (event.data) {
       data = Object.assign({}, data, event.data.json());
@@ -29,7 +29,9 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const urlToOpen = event.notification.data.url || '/';
+  const swScope = self.location.origin + self.location.pathname.replace(/\/[^/]*$/, '/');
+  const queryString = event.notification.data?.url || '';
+  const urlToOpen = queryString ? swScope + queryString : swScope;
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
@@ -39,7 +41,7 @@ self.addEventListener('notificationclick', (event) => {
         }
       }
       if (clients.openWindow) {
-        return clients.openWindow(new URL(urlToOpen, self.location.origin).href);
+        return clients.openWindow(urlToOpen);
       }
     })
   );

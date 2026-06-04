@@ -52,7 +52,7 @@ serve(async (req) => {
       icon: '/icon.svg',
       badge: '/icon.svg',
       tag: 'simpchat-message',
-      data: { url: `/?name=${recipientName}` },
+      data: { url: `?name=${recipientName}` },
     })
 
     try {
