@@ -304,6 +304,19 @@
     els.statusText.textContent = online ? 'online' : 'offline';
   }
 
+  function showBrowserNotification(msg) {
+    if (!document.hidden) return;
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const body = msg.msg_type === 'image' ? '📷 Image' : (msg.content || '');
+    try {
+      new Notification(msg.sender, {
+        body: body.substring(0, 200),
+        icon: 'icon.svg',
+        tag: 'simpchat-message-' + msg.sender,
+      });
+    } catch (e) {}
+  }
+
   function setupRealtime() {
     presenceChannel = supabase.channel('chat');
 
@@ -351,6 +364,7 @@
             state.unreadCount++;
             updateUnreadCount();
             showToast();
+            showBrowserNotification(msg);
           }
         }
       })
@@ -428,7 +442,7 @@
           state.lastKnownId = Math.max(state.lastKnownId, row.id);
           renderMessage(row);
           if (state.isAtBottom) scrollToBottom(true);
-          else { state.unreadCount++; updateUnreadCount(); showToast(); }
+          else { state.unreadCount++; updateUnreadCount(); showToast(); showBrowserNotification(row); }
         }
       }
     } catch (e) { console.error('Poll error:', e); }
@@ -752,6 +766,7 @@
   }
 
   async function setupPushNotifications() {
+    console.log('Push: setup starting, state:', { sw: 'serviceWorker' in navigator, pm: 'PushManager' in window, notif: 'Notification' in window, vapid: CONFIG.VAPID_PUBLIC_KEY && CONFIG.VAPID_PUBLIC_KEY !== 'REPLACE_ME', enabled: state.notificationsEnabled });
     if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
     if (!CONFIG.VAPID_PUBLIC_KEY || CONFIG.VAPID_PUBLIC_KEY === 'REPLACE_ME') {
       console.warn('Push: VAPID_PUBLIC_KEY not set in config.js');
