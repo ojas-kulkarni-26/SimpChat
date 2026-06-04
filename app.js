@@ -364,8 +364,8 @@
             state.unreadCount++;
             updateUnreadCount();
             showToast();
-            showBrowserNotification(msg);
           }
+          showBrowserNotification(msg);
         }
       })
       .subscribe();
@@ -442,7 +442,8 @@
           state.lastKnownId = Math.max(state.lastKnownId, row.id);
           renderMessage(row);
           if (state.isAtBottom) scrollToBottom(true);
-          else { state.unreadCount++; updateUnreadCount(); showToast(); showBrowserNotification(row); }
+          else { state.unreadCount++; updateUnreadCount(); showToast(); }
+          showBrowserNotification(row);
         }
       }
     } catch (e) { console.error('Poll error:', e); }
@@ -794,6 +795,7 @@
           { onConflict: 'name' }
         );
       if (error) console.error('Push: DB upsert error:', error);
+      else console.log('Push: subscription stored for', MY_NAME);
     } catch (e) {
       console.error('Push setup error:', e);
     }
