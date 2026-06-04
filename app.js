@@ -765,17 +765,16 @@
     return Uint8Array.from([].map.call(rawData, function (ch) { return ch.charCodeAt(0); }));
   }
 
-  async function setupPushNotifications() {
-    console.log('Push: setup starting, state:', { sw: 'serviceWorker' in navigator, pm: 'PushManager' in window, notif: 'Notification' in window, vapid: CONFIG.VAPID_PUBLIC_KEY && CONFIG.VAPID_PUBLIC_KEY !== 'REPLACE_ME', enabled: state.notificationsEnabled });
+  async function setupPushNotifications(preGranted) {
+    console.log('Push: setup starting state:', { serviceWorker: 'serviceWorker' in navigator, PushManager: 'PushManager' in window, Notification: 'Notification' in window, vapid: CONFIG.VAPID_PUBLIC_KEY && CONFIG.VAPID_PUBLIC_KEY !== 'REPLACE_ME', enabled: state.notificationsEnabled, permission: Notification.permission, preGranted: preGranted });
     if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
     if (!CONFIG.VAPID_PUBLIC_KEY || CONFIG.VAPID_PUBLIC_KEY === 'REPLACE_ME') {
       console.warn('Push: VAPID_PUBLIC_KEY not set in config.js');
       return;
     }
     if (!state.notificationsEnabled) return;
-    const permission = await Notification.requestPermission();
-    if (permission !== 'granted') {
-      console.warn('Push: notification permission ' + permission + '. Allow notifications in browser site settings, then reload.');
+    if (preGranted !== 'granted' && Notification.permission !== 'granted') {
+      console.warn('Push: notification permission ' + (Notification.permission) + '. Allow in browser site settings (lock icon), then reload.');
       return;
     }
     try {
@@ -818,7 +817,11 @@
     localStorage.setItem('chat_notifications', String(state.notificationsEnabled));
     updateNotifToggleUI();
     if (state.notificationsEnabled) {
-      await setupPushNotifications();
+      let perm = Notification.permission;
+      if (perm === 'default') {
+        perm = await Notification.requestPermission();
+      }
+      await setupPushNotifications(perm);
     } else {
       await disablePushNotifications();
     }
@@ -1023,10 +1026,14 @@
   }
 
   async function startApp() {
+    let notifPerm = 'default';
+    if ('Notification' in window) {
+      notifPerm = await Notification.requestPermission();
+    }
     try {
       setupRealtime();
       await loadInitialMessages();
-      await setupPushNotifications();
+      await setupPushNotifications(notifPerm);
       updateNotifToggleUI();
     } catch (e) {
       console.error('Load messages error:', e);
