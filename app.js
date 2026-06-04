@@ -779,7 +779,8 @@
       return;
     }
     try {
-      const registration = await navigator.serviceWorker.register('sw.js');
+      const swUrl = 'sw.js?url=' + encodeURIComponent(CONFIG.SUPABASE_URL) + '&key=' + encodeURIComponent(CONFIG.SUPABASE_ANON_KEY);
+      const registration = await navigator.serviceWorker.register(swUrl);
       await navigator.serviceWorker.ready;
       let subscription = await registration.pushManager.getSubscription();
       if (!subscription) {
@@ -1217,7 +1218,6 @@
     document.addEventListener('visibilitychange', () => {
       if (document.hidden && presenceChannel) {
         presenceChannel.track({ name: MY_NAME, last_typing: 0, online: false });
-        stopFallbackPoll();
       } else if (!document.hidden && presenceChannel) {
         presenceChannel.track({ name: MY_NAME, last_typing: 0, online: true });
         startFallbackPoll();

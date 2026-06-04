@@ -1,33 +1,49 @@
 import { serve } from 'https://deno.land/std@0.208.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
-import webpush from 'https://esm.sh/web-push@3.6.7'
 
-const vapidPublicKey = Deno.env.get('VAPID_PUBLIC_KEY')
-const vapidPrivateKey = Deno.env.get('VAPID_PRIVATE_KEY')
-const vapidSubject = Deno.env.get('VAPID_EMAIL') || 'mailto:chat@example.com'
-
-if (!vapidPublicKey || !vapidPrivateKey) {
-  console.error('FATAL: Missing VAPID_PUBLIC_KEY or VAPID_PRIVATE_KEY env vars')
+function b64url(buf: ArrayBuffer): string {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)))
+    .replace(/=/g, '').replace(/\+/g, '-').replace(/\//g, '_')
 }
 
-webpush.setVapidDetails(vapidSubject, vapidPublicKey!, vapidPrivateKey!)
+function fromB64url(str: string): Uint8Array {
+  const s = str.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - str.length % 4) % 4)
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0))
+}
+
+async function vapidSign(privB64: string, pubB64: string, sub: string, aud: string): Promise<string> {
+  const pub = fromB64url(pubB64)
+  const jwk = {
+    kty: 'EC', crv: 'P-256',
+    d: b64url(fromB64url(privB64).buffer),
+    x: b64url(pub.slice(1, 33).buffer),
+    y: b64url(pub.slice(33, 65).buffer),
+  }
+  const key = await crypto.subtle.importKey('jwk', jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign'])
+
+  const h = b64url(new TextEncoder().encode(JSON.stringify({ alg: 'ES256', typ: 'JWT' })))
+  const p = b64url(new TextEncoder().encode(JSON.stringify({ aud, exp: Math.floor(Date.now() / 1000) + 86400, sub })))
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(h + '.' + p))
+
+  return h + '.' + p + '.' + b64url(sig)
+}
 
 serve(async (req) => {
   try {
     const body = await req.json()
     const { type, table, record } = body
+    if (type !== 'INSERT' || table !== 'messages') return new Response('ignored', { status: 200 })
 
-    if (type !== 'INSERT' || table !== 'messages') {
-      return new Response('ignored', { status: 200 })
+    const pubKey = Deno.env.get('VAPID_PUBLIC_KEY')
+    const privKey = Deno.env.get('VAPID_PRIVATE_KEY')
+    const subject = Deno.env.get('VAPID_EMAIL') || 'mailto:chat@example.com'
+
+    if (!pubKey || !privKey) {
+      console.error('Missing VAPID keys')
+      return new Response('missing keys', { status: 500 })
     }
 
-    if (!vapidPublicKey || !vapidPrivateKey) {
-      console.error('VAPID keys not configured')
-      return new Response('VAPID keys not configured', { status: 500 })
-    }
-
-    const msg = record
-    const recipientName = msg.sender === 'Arnav' ? 'Ojas' : 'Arnav'
+    const recipient = record.sender === 'Arnav' ? 'Ojas' : 'Arnav'
 
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL')!,
@@ -38,36 +54,35 @@ serve(async (req) => {
     const { data: sub } = await supabase
       .from('push_subscriptions')
       .select('subscription')
-      .eq('name', recipientName)
+      .eq('name', recipient)
       .maybeSingle()
 
-    if (!sub?.subscription) {
-      return new Response('no subscription for ' + recipientName, { status: 200 })
-    }
+    if (!sub?.subscription) return new Response('no subscription', { status: 200 })
 
-    const content = msg.msg_type === 'image' ? '📷 Image' : (msg.content || '')
-    const payload = JSON.stringify({
-      title: msg.sender,
-      body: content.substring(0, 200),
-      icon: 'icon.svg',
-      badge: 'icon.svg',
-      tag: 'simpchat-message',
-      data: { url: `?name=${recipientName}` },
+    const jwt = await vapidSign(privKey, pubKey, subject, new URL(sub.subscription.endpoint).origin)
+    const pubB64 = b64url(fromB64url(pubKey).buffer)
+
+    const resp = await fetch(sub.subscription.endpoint, {
+      method: 'POST',
+      headers: {
+        TTL: '86400',
+        'Content-Length': '0',
+        Authorization: `WebPush ${jwt}`,
+        'Crypto-Key': `p256ecdsa=${pubB64}`,
+      },
     })
 
-    try {
-      await webpush.sendNotification(sub.subscription, payload)
-    } catch (pushErr: unknown) {
-      const status = (pushErr as { statusCode?: number })?.statusCode
-      console.error('Push send error:', status, (pushErr as Error)?.message)
-      if (status === 410 || status === 404) {
-        await supabase.from('push_subscriptions').delete().eq('name', recipientName)
+    if (!resp.ok) {
+      const text = await resp.text()
+      console.error('Push fail', resp.status, text)
+      if (resp.status === 410 || resp.status === 404) {
+        await supabase.from('push_subscriptions').delete().eq('name', recipient)
       }
     }
 
     return new Response('sent', { status: 200 })
   } catch (err) {
-    console.error('Push handler error:', (err as Error)?.message)
+    console.error('Push error:', (err as Error).message)
     return new Response('error', { status: 500 })
   }
 })
