@@ -753,13 +753,19 @@
 
   async function setupPushNotifications() {
     if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
-    if (!CONFIG.VAPID_PUBLIC_KEY || CONFIG.VAPID_PUBLIC_KEY === 'REPLACE_ME') return;
+    if (!CONFIG.VAPID_PUBLIC_KEY || CONFIG.VAPID_PUBLIC_KEY === 'REPLACE_ME') {
+      console.warn('Push: VAPID_PUBLIC_KEY not set in config.js');
+      return;
+    }
     if (!state.notificationsEnabled) return;
+    const permission = await Notification.requestPermission();
+    if (permission !== 'granted') {
+      console.warn('Push: notification permission not granted:', permission);
+      return;
+    }
     try {
       const registration = await navigator.serviceWorker.register('/sw.js');
       await navigator.serviceWorker.ready;
-      const permission = await Notification.requestPermission();
-      if (permission !== 'granted') return;
       let subscription = await registration.pushManager.getSubscription();
       if (!subscription) {
         subscription = await registration.pushManager.subscribe({
@@ -767,12 +773,13 @@
           applicationServerKey: urlBase64ToUint8Array(CONFIG.VAPID_PUBLIC_KEY),
         });
       }
-      await supabase
+      const { error } = await supabase
         .from('push_subscriptions')
         .upsert(
           { name: MY_NAME, subscription: subscription.toJSON(), updated_at: new Date().toISOString() },
           { onConflict: 'name' }
         );
+      if (error) console.error('Push: DB upsert error:', error);
     } catch (e) {
       console.error('Push setup error:', e);
     }
@@ -1004,7 +1011,7 @@
     try {
       setupRealtime();
       await loadInitialMessages();
-      setupPushNotifications();
+      await setupPushNotifications();
       updateNotifToggleUI();
     } catch (e) {
       console.error('Load messages error:', e);

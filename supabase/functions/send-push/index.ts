@@ -1,12 +1,16 @@
 import { serve } from 'https://deno.land/std@0.208.0/http/server.ts'
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0'
-import * as webpush from 'npm:web-push@3.6.7'
+import webpush from 'https://esm.sh/web-push@3.6.7'
 
-const vapidPublicKey = Deno.env.get('VAPID_PUBLIC_KEY') ?? ''
-const vapidPrivateKey = Deno.env.get('VAPID_PRIVATE_KEY') ?? ''
-const vapidEmail = Deno.env.get('VAPID_EMAIL') ?? 'chat@example.com'
+const vapidPublicKey = Deno.env.get('VAPID_PUBLIC_KEY')
+const vapidPrivateKey = Deno.env.get('VAPID_PRIVATE_KEY')
+const vapidSubject = Deno.env.get('VAPID_EMAIL') || 'mailto:chat@example.com'
 
-webpush.setVapidDetails(`mailto:${vapidEmail}`, vapidPublicKey, vapidPrivateKey)
+if (!vapidPublicKey || !vapidPrivateKey) {
+  console.error('FATAL: Missing VAPID_PUBLIC_KEY or VAPID_PRIVATE_KEY env vars')
+}
+
+webpush.setVapidDetails(vapidSubject, vapidPublicKey!, vapidPrivateKey!)
 
 serve(async (req) => {
   try {
@@ -15,6 +19,11 @@ serve(async (req) => {
 
     if (type !== 'INSERT' || table !== 'messages') {
       return new Response('ignored', { status: 200 })
+    }
+
+    if (!vapidPublicKey || !vapidPrivateKey) {
+      console.error('VAPID keys not configured')
+      return new Response('VAPID keys not configured', { status: 500 })
     }
 
     const msg = record
@@ -33,7 +42,7 @@ serve(async (req) => {
       .maybeSingle()
 
     if (!sub?.subscription) {
-      return new Response('no subscription', { status: 200 })
+      return new Response('no subscription for ' + recipientName, { status: 200 })
     }
 
     const content = msg.msg_type === 'image' ? '📷 Image' : (msg.content || '')
@@ -48,17 +57,17 @@ serve(async (req) => {
 
     try {
       await webpush.sendNotification(sub.subscription, payload)
-    } catch (pushErr) {
-      if (pushErr?.statusCode === 410 || pushErr?.statusCode === 404) {
+    } catch (pushErr: unknown) {
+      const status = (pushErr as { statusCode?: number })?.statusCode
+      console.error('Push send error:', status, (pushErr as Error)?.message)
+      if (status === 410 || status === 404) {
         await supabase.from('push_subscriptions').delete().eq('name', recipientName)
-      } else {
-        console.error('Push send error:', pushErr)
       }
     }
 
     return new Response('sent', { status: 200 })
   } catch (err) {
-    console.error('Push handler error:', err)
+    console.error('Push handler error:', (err as Error)?.message)
     return new Response('error', { status: 500 })
   }
 })
