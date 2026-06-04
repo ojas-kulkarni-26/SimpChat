@@ -760,7 +760,7 @@
     if (!state.notificationsEnabled) return;
     const permission = await Notification.requestPermission();
     if (permission !== 'granted') {
-      console.warn('Push: notification permission not granted:', permission);
+      console.warn('Push: notification permission ' + permission + '. Allow notifications in browser site settings, then reload.');
       return;
     }
     try {
