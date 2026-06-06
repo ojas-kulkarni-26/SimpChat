@@ -109,6 +109,11 @@
     <button data-mood="Studying" class="mood-option">📚 Studying</button>
   </div>
 
+  <div id="image-lightbox" class="hidden" role="dialog" aria-modal="true" aria-label="Image preview">
+    <button id="lightbox-close" aria-label="Close image">✕</button>
+    <img id="lightbox-img" alt="Enlarged image">
+  </div>
+
   <input type="file" id="image-upload" accept="image/*" hidden aria-hidden="true">
 
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>

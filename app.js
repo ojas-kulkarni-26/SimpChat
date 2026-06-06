@@ -136,7 +136,10 @@
     if (msg.reply_to) {
       const parent = state.msgMap.get(msg.reply_to);
       if (parent) {
-        replyHTML = '<div class="reply-preview"><span class="reply-preview-sender">' + escapeHtml(parent.sender) + '</span><span class="reply-preview-content">' + escapeHtml(parent.content.substring(0, 80)) + '</span></div>';
+        const replyContent = parent.msg_type === 'image' ? '📷 Image' : (parent.is_deleted ? 'Message deleted' : parent.content.substring(0, 80));
+        replyHTML = '<div class="reply-preview" data-reply-to="' + msg.reply_to + '"><span class="reply-preview-sender">' + escapeHtml(parent.sender) + '</span><span class="reply-preview-content">' + escapeHtml(replyContent) + '</span></div>';
+      } else {
+        replyHTML = '<div class="reply-preview"><span class="reply-preview-sender">Unknown</span><span class="reply-preview-content">Message deleted</span></div>';
       }
     }
     const isSelf = msg.sender === MY_NAME;
@@ -189,6 +192,8 @@
     const bubble = div.querySelector('.message-bubble');
     if (bubble) {
       bubble.addEventListener('click', function (e) {
+        if (e.target.closest('.reply-preview')) return;
+        if (e.target.closest('.message-image')) return;
         if (window.innerWidth <= 480) {
           const actions = div.querySelector('.message-actions');
           if (actions) { actions.classList.toggle('show'); }
@@ -341,6 +346,22 @@
     }
   }
 
+  let presenceHeartbeatTimer = null;
+
+  function startPresenceHeartbeat() {
+    stopPresenceHeartbeat();
+    presenceHeartbeatTimer = setInterval(() => {
+      updateMyPresence(!document.hidden, state.isTyping);
+    }, 30000);
+  }
+
+  function stopPresenceHeartbeat() {
+    if (presenceHeartbeatTimer) {
+      clearInterval(presenceHeartbeatTimer);
+      presenceHeartbeatTimer = null;
+    }
+  }
+
   async function updateMyPresence(online, isTyping) {
     try {
       await supabase
@@ -352,23 +373,35 @@
           mood: state.mood || '',
           last_seen: new Date().toISOString(),
         }, { onConflict: 'name' });
-    } catch (e) {}
+    } catch (e) {
+      console.error('Presence update error:', e);
+    }
   }
 
   async function loadInitialPresence() {
     try {
       const { data } = await supabase
         .from('presence')
-        .select('name, is_online, is_typing, mood')
+        .select('name, is_online, is_typing, mood, last_seen')
         .in('name', PARTICIPANTS.filter(p => p !== MY_NAME));
       if (data) {
-        const onlineNames = data.filter(r => r.is_online).map(r => r.name);
+        const now = Date.now();
+        const onlineNames = data.filter(r => {
+          if (r.is_online) return true;
+          if (r.last_seen) {
+            const diff = now - new Date(r.last_seen).getTime();
+            return diff < 120000;
+          }
+          return false;
+        }).map(r => r.name);
         updateStatus(onlineNames);
         data.filter(r => r.is_typing).forEach(r => typingUsers.add(r.name));
         if (typingUsers.size > 0) showTyping([...typingUsers][0]);
         data.forEach(r => updateParticipantMood(r.name, r.mood || ''));
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error('Load presence error:', e);
+    }
     await updateMyPresence(true, false);
   }
 
@@ -738,6 +771,25 @@
     } catch (e) { console.error('Delete error:', e); }
   }
 
+  function showImageLightbox(src) {
+    const lightbox = document.getElementById('image-lightbox');
+    const img = document.getElementById('lightbox-img');
+    if (!lightbox || !img) return;
+    img.src = src;
+    img.className = '';
+    lightbox.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeImageLightbox() {
+    const lightbox = document.getElementById('image-lightbox');
+    const img = document.getElementById('lightbox-img');
+    if (!lightbox) return;
+    lightbox.classList.add('hidden');
+    img.src = '';
+    document.body.style.overflow = '';
+  }
+
   function showNotification(msg) {
     const old = q('#app-notification');
     if (old) old.remove();
@@ -984,10 +1036,11 @@
     els.formatToolbar.classList.add('hidden');
   }
 
-  function setReply(msgId, sender, content) {
-    state.replyTo = { id: msgId, sender, content: content.substring(0, 100) };
+  function setReply(msgId, sender, content, msgType) {
+    const displayContent = msgType === 'image' ? '📷 Image' : content.substring(0, 100);
+    state.replyTo = { id: msgId, sender, content: displayContent };
     els.replySender.textContent = sender;
-    els.replyContent.textContent = content.substring(0, 100);
+    els.replyContent.textContent = displayContent;
     els.replyBar.classList.remove('hidden');
     els.input.focus();
   }
@@ -1010,7 +1063,13 @@
     const name = args.get('name');
     if (name) {
       MY_NAME = name.trim();
+      localStorage.setItem('chat_identity', MY_NAME);
       window.history.replaceState({}, '', window.location.pathname);
+    } else {
+      const saved = localStorage.getItem('chat_identity');
+      if (saved && PARTICIPANTS.includes(saved)) {
+        MY_NAME = saved;
+      }
     }
   }
 
@@ -1033,6 +1092,7 @@
 
   function setIdentity(name) {
     MY_NAME = name;
+    localStorage.setItem('chat_identity', MY_NAME);
     els.friendName.textContent = PARTICIPANTS.filter(p => p !== name).join(', ');
     els.participantStatuses.innerHTML = PARTICIPANTS.filter(p => p !== name).map(p =>
       '<span class="participant-status" data-name="' + escapeHtml(p) + '">'
@@ -1151,6 +1211,7 @@
       return;
     }
     startFallbackPoll();
+    startPresenceHeartbeat();
     state.ready = true;
   }
 
@@ -1294,6 +1355,21 @@
     });
 
     els.msgList.addEventListener('click', (e) => {
+      const replyPreview = e.target.closest('.reply-preview');
+      if (replyPreview) {
+        e.stopPropagation();
+        const targetId = parseInt(replyPreview.dataset.replyTo);
+        if (targetId) {
+          const targetEl = q('[data-id="' + targetId + '"]');
+          if (targetEl) {
+            targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            targetEl.classList.add('highlight-flash');
+            setTimeout(() => targetEl.classList.remove('highlight-flash'), 2000);
+          }
+        }
+        return;
+      }
+
       const badge = e.target.closest('.reaction-badge');
       if (badge) {
         const msgEl = badge.closest('.message');
@@ -1302,7 +1378,11 @@
         return;
       }
       const img = e.target.closest('.message-image');
-      if (img) { window.open(img.src); return; }
+      if (img) {
+        e.stopPropagation();
+        showImageLightbox(img.src);
+        return;
+      }
       const btn = e.target.closest('button');
       if (!btn) { els.reactionPicker.classList.add('hidden'); return; }
       const msgEl = e.target.closest('.message');
@@ -1312,7 +1392,7 @@
       if (!msg) return;
 
       if (btn.classList.contains('action-reply')) {
-        setReply(msgId, msg.sender, msg.is_deleted ? (msg.content || 'Message was deleted') : msg.content);
+        setReply(msgId, msg.sender, msg.is_deleted ? (msg.content || 'Message was deleted') : msg.content, msg.msg_type);
       }
       if (btn.classList.contains('action-react')) {
         positionPicker(btn);
@@ -1340,6 +1420,23 @@
       if (e.key === 'Escape') els.reactionPicker.classList.add('hidden');
     });
 
+    document.getElementById('image-lightbox').addEventListener('click', function (e) {
+      if (e.target === this || e.target.id === 'lightbox-close') {
+        closeImageLightbox();
+      }
+    });
+
+    document.getElementById('lightbox-img').addEventListener('click', function (e) {
+      e.stopPropagation();
+      this.classList.toggle('zoomed');
+    });
+
+    document.addEventListener('keydown', function lightboxEsc(e) {
+      if (e.key === 'Escape' && !document.getElementById('image-lightbox').classList.contains('hidden')) {
+        closeImageLightbox();
+      }
+    });
+
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
         updateMyPresence(false, false);
@@ -1348,6 +1445,19 @@
         startFallbackPoll();
         pollNewMessages();
       }
+    });
+
+    window.addEventListener('focus', () => {
+      updateMyPresence(true, false);
+      pollNewMessages();
+    });
+
+    window.addEventListener('blur', () => {
+      updateMyPresence(false, false);
+    });
+
+    window.addEventListener('beforeunload', () => {
+      updateMyPresence(false, false);
     });
   }
 

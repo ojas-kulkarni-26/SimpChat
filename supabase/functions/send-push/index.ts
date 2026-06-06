@@ -36,11 +36,14 @@ async function hmacSha256(key: Uint8Array, data: Uint8Array): Promise<Uint8Array
 async function hkdfExpand(prk: Uint8Array, info: Uint8Array, len: number): Promise<Uint8Array> {
   let t = new Uint8Array(0)
   const out = new Uint8Array(len)
-  for (let i = 1; out.length < len; i++) {
+  let written = 0
+  for (let i = 1; written < len; i++) {
     t = await hmacSha256(prk, new Uint8Array([...t, ...info, i]))
-    out.set(t, (i - 1) * 32)
+    const copy = Math.min(t.length, len - written)
+    out.set(t.subarray(0, copy), written)
+    written += copy
   }
-  return out.slice(0, len)
+  return out
 }
 
 async function encryptWebPushPayload(
@@ -122,13 +125,11 @@ serve(async (req) => {
       try {
         const keys = sub.subscription.keys
         let body: Uint8Array | null = null
-        let contentLength = '0'
         let extraHeaders: Record<string, string> = {}
 
         if (keys && keys.p256dh && keys.auth) {
           try {
             body = await encryptWebPushPayload(payload, fromB64url(keys.p256dh), fromB64url(keys.auth))
-            contentLength = String(body.length)
             extraHeaders['Content-Encoding'] = 'aes128gcm'
             extraHeaders['Content-Type'] = 'application/octet-stream'
           } catch (e) {
@@ -141,7 +142,7 @@ serve(async (req) => {
           signal: controller.signal,
           headers: {
             TTL: '86400',
-            'Content-Length': contentLength,
+            ...(body ? {} : { 'Content-Length': '0' }),
             Authorization: `WebPush ${jwt}`,
             'Crypto-Key': `p256ecdsa=${pubB64}`,
             ...extraHeaders,
