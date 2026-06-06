@@ -16,6 +16,7 @@
     name TEXT PRIMARY KEY,
     is_online BOOLEAN NOT NULL DEFAULT FALSE,
     is_typing BOOLEAN NOT NULL DEFAULT FALSE,
+    mood TEXT NOT NULL DEFAULT '',
     last_seen TIMESTAMPTZ
   );
 

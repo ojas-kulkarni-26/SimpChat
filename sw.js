@@ -35,14 +35,13 @@ self.addEventListener('push', (event) => {
       }
 
       const swScope = self.location.origin + self.location.pathname.replace(/\/[^/]*$/, '/');
-      const friend = title === 'Arnav' ? 'Ojas' : 'Arnav';
 
       await self.registration.showNotification(title, {
         body,
         icon: 'icon.svg',
         badge: 'icon.svg',
         tag: 'simpchat-push',
-        data: { url: '?name=' + friend },
+        data: { url: '' },
         vibrate: [200, 100, 200],
       });
     })()
@@ -52,8 +51,6 @@ self.addEventListener('push', (event) => {
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const swScope = self.location.origin + self.location.pathname.replace(/\/[^/]*$/, '/');
-  const queryString = event.notification.data?.url || '';
-  const urlToOpen = queryString ? swScope + queryString : swScope;
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
@@ -63,7 +60,7 @@ self.addEventListener('notificationclick', (event) => {
         }
       }
       if (clients.openWindow) {
-        return clients.openWindow(urlToOpen);
+        return clients.openWindow(swScope);
       }
     })
   );

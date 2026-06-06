@@ -43,44 +43,46 @@ serve(async (req) => {
       return new Response('missing keys', { status: 500 })
     }
 
-    const recipient = record.sender === 'Arnav' ? 'Ojas' : 'Arnav'
-
     const supabase = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!,
       { auth: { autoRefreshToken: false, persistSession: false } }
     )
 
-    const { data: sub } = await supabase
+    const { data: subs } = await supabase
       .from('push_subscriptions')
-      .select('subscription')
-      .eq('name', recipient)
-      .maybeSingle()
+      .select('*')
+      .neq('name', record.sender)
 
-    if (!sub?.subscription) return new Response('no subscription', { status: 200 })
+    if (!subs || subs.length === 0) return new Response('no subscriptions', { status: 200 })
 
-    const jwt = await vapidSign(privKey, pubKey, subject, new URL(sub.subscription.endpoint).origin)
-    const pubB64 = b64url(fromB64url(pubKey).buffer)
+    const results = await Promise.allSettled(subs.map(async (sub) => {
+      const jwt = await vapidSign(privKey, pubKey, subject, new URL(sub.subscription.endpoint).origin)
+      const pubB64 = b64url(fromB64url(pubKey).buffer)
 
-    const resp = await fetch(sub.subscription.endpoint, {
-      method: 'POST',
-      headers: {
-        TTL: '86400',
-        'Content-Length': '0',
-        Authorization: `WebPush ${jwt}`,
-        'Crypto-Key': `p256ecdsa=${pubB64}`,
-      },
-    })
+      const resp = await fetch(sub.subscription.endpoint, {
+        method: 'POST',
+        headers: {
+          TTL: '86400',
+          'Content-Length': '0',
+          Authorization: `WebPush ${jwt}`,
+          'Crypto-Key': `p256ecdsa=${pubB64}`,
+        },
+      })
 
-    if (!resp.ok) {
-      const text = await resp.text()
-      console.error('Push fail', resp.status, text)
-      if (resp.status === 410 || resp.status === 404) {
-        await supabase.from('push_subscriptions').delete().eq('name', recipient)
+      if (!resp.ok) {
+        const text = await resp.text()
+        console.error('Push fail', resp.status, text)
+        if (resp.status === 410 || resp.status === 404) {
+          await supabase.from('push_subscriptions').delete().eq('name', sub.name)
+        }
       }
-    }
+    }))
 
-    return new Response('sent', { status: 200 })
+    const failed = results.filter(r => r.status === 'rejected').length
+    if (failed > 0) console.error(failed, 'push(es) failed')
+
+    return new Response('sent to ' + subs.length + ' recipient(s)', { status: 200 })
   } catch (err) {
     console.error('Push error:', (err as Error).message)
     return new Response('error', { status: 500 })

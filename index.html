@@ -24,6 +24,7 @@
       <div class="identity-buttons">
         <button id="btn-arnav" class="identity-btn">Arnav</button>
         <button id="btn-ojas" class="identity-btn">Ojas</button>
+        <button id="btn-shaurya" class="identity-btn">Shaurya</button>
       </div>
       <div id="password-group" class="hidden">
         <p>Enter password for Ojas</p>
@@ -40,16 +41,14 @@
     <header id="header" role="banner">
       <div class="header-left">
         <div class="friend-info">
-          <span class="friend-name" id="friend-name"></span>
-          <span class="status-indicator">
-            <span class="status-dot" id="status-dot" aria-hidden="true"></span>
-            <span class="status-text" id="status-text">offline</span>
-          </span>
+          <span class="friend-name" id="friend-name">Participants</span>
+          <div class="participant-statuses" id="participant-statuses"></div>
         </div>
       </div>
       <div class="header-right">
         <button id="notif-toggle" class="icon-btn" title="Enable notifications" aria-label="Toggle notifications">🔕</button>
         <button id="clear-chat-btn" class="icon-btn" title="Clear all messages" aria-label="Clear all messages" style="display:none">🗑️</button>
+        <button id="mood-btn" class="icon-btn" title="Set your mood" aria-label="Set mood">🎯</button>
         <button id="theme-toggle" class="icon-btn" title="Toggle theme" aria-label="Toggle theme">🌙</button>
       </div>
     </header>
@@ -101,6 +100,13 @@
     <button aria-label="Angry">😡</button><button aria-label="Skull">💀</button><button aria-label="Dislike">👎</button>
     <button aria-label="Clap">👏</button><button aria-label="Sparkles">✨</button><button aria-label="Rocket">😭</button>
     <button aria-label="Eyes">👀</button><button aria-label="100">💯</button><button aria-label="Mind blown">🤯</button><button aria-label="Salute">🫡</button>
+  </div>
+
+  <div id="mood-picker" class="hidden" role="dialog" aria-label="Set your mood">
+    <div class="mood-picker-header">Set your mood</div>
+    <button data-mood="Free" class="mood-option">😊 Free</button>
+    <button data-mood="Busy" class="mood-option">⏳ Busy</button>
+    <button data-mood="Studying" class="mood-option">📚 Studying</button>
   </div>
 
   <input type="file" id="image-upload" accept="image/*" hidden aria-hidden="true">

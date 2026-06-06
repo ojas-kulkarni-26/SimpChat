@@ -6,8 +6,8 @@
     return;
   }
 
+  const PARTICIPANTS = ['Arnav', 'Ojas', 'Shaurya'];
   let MY_NAME = null;
-  let FRIEND = null;
   const TYPING_IDLE_MS = 3000;
   const MAX_MESSAGES = 1000;
   const DECAY_BATCH = 100;
@@ -30,9 +30,11 @@
     isAtBottom: true,
     unreadCount: 0,
     isSending: false,
+    isTyping: false,
     ready: false,
     pollTimer: null,
     notificationsEnabled: localStorage.getItem('chat_notifications') !== 'false',
+    mood: localStorage.getItem('chat_mood') || '',
   };
 
   const els = {};
@@ -44,14 +46,16 @@
     els.nameModal = q('#name-modal');
     els.btnArnav = q('#btn-arnav');
     els.btnOjas = q('#btn-ojas');
+    els.btnShaurya = q('#btn-shaurya');
     els.passwordGroup = q('#password-group');
     els.passwordInput = q('#password-input');
     els.passwordSubmit = q('#password-submit');
     els.passwordError = q('#password-error');
     els.friendName = q('#friend-name');
-    els.statusDot = q('#status-dot');
-    els.statusText = q('#status-text');
+    els.participantStatuses = q('#participant-statuses');
     els.themeToggle = q('#theme-toggle');
+    els.moodBtn = q('#mood-btn');
+    els.moodPicker = q('#mood-picker');
     els.notifToggle = q('#notif-toggle');
     els.clearChatBtn = q('#clear-chat-btn');
     els.msgContainer = q('#messages-container');
@@ -73,7 +77,6 @@
   }
 
   const supabase = window.supabase.createClient(CONFIG.SUPABASE_URL, CONFIG.SUPABASE_ANON_KEY);
-  let presenceChannel = null;
 
   function formatTime(iso) {
     if (!iso) return '';
@@ -135,11 +138,12 @@
         replyHTML = '<div class="reply-preview"><span class="reply-preview-sender">' + escapeHtml(parent.sender) + '</span><span class="reply-preview-content">' + escapeHtml(parent.content.substring(0, 80)) + '</span></div>';
       }
     }
+    const isSelf = msg.sender === MY_NAME;
     let contentHTML = '';
     if (msg.msg_type === 'image') {
-      contentHTML = '<img src="' + msg.content + '" class="message-image" loading="lazy" alt="Image shared by ' + escapeHtml(msg.sender) + '">';
+      contentHTML = (isSelf ? '' : '<div class="message-sender">' + escapeHtml(msg.sender) + '</div>') + '<img src="' + msg.content + '" class="message-image" loading="lazy" alt="Image shared by ' + escapeHtml(msg.sender) + '">';
     } else if (msg.content) {
-      contentHTML = renderMarkdown(msg.content);
+      contentHTML = (isSelf ? '' : '<div class="message-sender">' + escapeHtml(msg.sender) + '</div>') + renderMarkdown(msg.content);
     }
     let reactionsHTML = '';
     if (msg.reactions) {
@@ -156,7 +160,6 @@
       } catch (e) {}
     }
     const timeStr = formatTime(msg.created_at);
-    const isSelf = msg.sender === MY_NAME;
     const edited = msg.edited_at ? ' <span style="font-size:10px;opacity:0.5">edited</span>' : '';
     return '<div class="message-bubble">'
       + replyHTML
@@ -299,9 +302,28 @@
 
   function hideTyping() { els.typingIndicator.classList.add('hidden'); }
 
-  function updateStatus(online) {
-    els.statusDot.className = 'status-dot' + (online ? ' online' : '');
-    els.statusText.textContent = online ? 'online' : 'offline';
+  function updateStatus(onlineNames) {
+    els.participantStatuses.querySelectorAll('.participant-status').forEach(el => {
+      const name = el.dataset.name;
+      const dot = el.querySelector('.status-dot');
+      dot.className = 'status-dot' + (onlineNames.includes(name) ? ' online' : '');
+    });
+  }
+
+  function updateParticipantMood(name, mood) {
+    const el = els.participantStatuses.querySelector('.participant-status[data-name="' + name + '"]');
+    if (!el) return;
+    let moodSpan = el.querySelector('.mood-text');
+    if (mood) {
+      if (!moodSpan) {
+        moodSpan = document.createElement('span');
+        moodSpan.className = 'mood-text';
+        el.appendChild(moodSpan);
+      }
+      moodSpan.textContent = ' · ' + mood;
+    } else if (moodSpan) {
+      moodSpan.remove();
+    }
   }
 
   function showBrowserNotification(msg) {
@@ -317,42 +339,63 @@
     } catch (e) {}
   }
 
-  function setupRealtime() {
-    presenceChannel = supabase.channel('chat');
+  async function updateMyPresence(online, isTyping) {
+    try {
+      await supabase
+        .from('presence')
+        .upsert({
+          name: MY_NAME,
+          is_online: online,
+          is_typing: isTyping || false,
+          mood: state.mood || '',
+          last_seen: new Date().toISOString(),
+        }, { onConflict: 'name' });
+    } catch (e) {}
+  }
 
-    presenceChannel
-      .on('presence', { event: 'sync' }, () => {
-        const presences = presenceChannel.presenceState();
-        let friendOnline = false;
-        let friendTyping = false;
-        const now = Date.now();
-        for (const key of Object.keys(presences)) {
-          for (const p of presences[key]) {
-            if (p.name === FRIEND) {
-              friendOnline = true;
-              if (p.last_typing && now - p.last_typing < 4000) friendTyping = true;
-            }
-          }
+  async function loadInitialPresence() {
+    try {
+      const { data } = await supabase
+        .from('presence')
+        .select('name, is_online, is_typing, mood')
+        .in('name', PARTICIPANTS.filter(p => p !== MY_NAME));
+      if (data) {
+        const onlineNames = data.filter(r => r.is_online).map(r => r.name);
+        updateStatus(onlineNames);
+        data.filter(r => r.is_typing).forEach(r => typingUsers.add(r.name));
+        if (typingUsers.size > 0) showTyping([...typingUsers][0]);
+        data.forEach(r => updateParticipantMood(r.name, r.mood || ''));
+      }
+    } catch (e) {}
+    await updateMyPresence(true, false);
+  }
+
+  const typingUsers = new Set();
+
+  function setupRealtime() {
+    supabase
+      .channel('presence-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'presence' }, (payload) => {
+        const r = payload.new;
+        if (r.name === MY_NAME) return;
+        const el = els.participantStatuses.querySelector('.participant-status[data-name="' + r.name + '"]');
+        if (el) {
+          const dot = el.querySelector('.status-dot');
+          dot.className = 'status-dot' + (r.is_online ? ' online' : '');
         }
-        updateStatus(friendOnline);
-        if (friendTyping && friendOnline) showTyping(FRIEND);
+        if (r.is_typing) typingUsers.add(r.name);
+        else typingUsers.delete(r.name);
+        if (typingUsers.size > 0) showTyping([...typingUsers][0]);
         else hideTyping();
+        updateParticipantMood(r.name, r.mood || '');
       })
-      .subscribe(async (status) => {
-        if (status === 'SUBSCRIBED') {
-          await presenceChannel.track({
-            name: MY_NAME,
-            last_typing: 0,
-            online: true,
-          });
-        }
-      });
+      .subscribe();
 
     supabase
       .channel('messages-insert')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
         const msg = payload.new;
-        if (msg.sender === FRIEND && msg.id > state.lastKnownId) {
+        if (msg.sender !== MY_NAME && msg.id > state.lastKnownId) {
           msg.reactions = typeof msg.reactions === 'string' ? msg.reactions : JSON.stringify(msg.reactions);
           state.messages.push(msg);
           state.msgMap.set(msg.id, msg);
@@ -372,9 +415,11 @@
 
     supabase
       .channel('read-state-updates')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'read_state', filter: 'name=eq.' + FRIEND }, (payload) => {
-        const friendLastRead = payload.new.last_read_id || 0;
-        updateReadStatus(friendLastRead);
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'read_state' }, (payload) => {
+        const { name: friendName, last_read_id } = payload.new;
+        if (friendName && friendName !== MY_NAME) {
+          updateReadStatus(friendName, last_read_id || 0);
+        }
       })
       .subscribe();
 
@@ -405,21 +450,30 @@
       .subscribe();
   }
 
-  let lastProcessedFriendRead = 0;
+  let lastProcessedFriendReads = {};
+  let friendReadStates = {};
 
-  function updateReadStatus(friendLastRead) {
-    if (friendLastRead <= lastProcessedFriendRead) return;
+  function updateReadStatus(friendName, friendLastRead) {
+    const lastProcessed = lastProcessedFriendReads[friendName] || 0;
+    if (friendLastRead <= lastProcessed) return;
+    lastProcessedFriendReads[friendName] = friendLastRead;
+    friendReadStates[friendName] = friendLastRead;
+    const otherUsers = PARTICIPANTS.filter(p => p !== MY_NAME);
     for (const msg of state.messages) {
-      if (msg.sender === MY_NAME && !msg.read && msg.id > 0 && msg.id <= friendLastRead && msg.id > lastProcessedFriendRead) {
-        msg.read = true;
+      if (msg.sender !== MY_NAME) continue;
+      const allRead = otherUsers.every(u => (friendReadStates[u] || 0) >= msg.id);
+      if (allRead !== msg.read) {
+        msg.read = allRead;
         const el = q('[data-id="' + msg.id + '"]');
         if (el) {
           const st = el.querySelector('.message-status');
-          if (st) { st.className = 'message-status read'; st.textContent = '✓✓'; }
+          if (st) {
+            st.className = 'message-status ' + (allRead ? 'read' : 'sent');
+            st.textContent = allRead ? '✓✓' : '✓';
+          }
         }
       }
     }
-    lastProcessedFriendRead = friendLastRead;
   }
 
   async function pollNewMessages() {
@@ -429,7 +483,7 @@
         .from('messages')
         .select('*')
         .gt('id', state.lastKnownId)
-        .eq('sender', FRIEND)
+        .neq('sender', MY_NAME)
         .order('id', { ascending: true });
       if (error) throw error;
       if (data && data.length > 0) {
@@ -472,18 +526,23 @@
       row.reactions = typeof row.reactions === 'string' ? row.reactions : JSON.stringify(row.reactions);
       state.messages.push(row);
       state.msgMap.set(row.id, row);
-      if (row.id > state.lastKnownId && row.sender === FRIEND) state.lastKnownId = row.id;
+      if (row.id > state.lastKnownId && row.sender !== MY_NAME) state.lastKnownId = row.id;
     });
     batchRender(rows);
     state.hasMore = rows.length >= PAGE_SIZE;
     scrollToBottom(false);
 
-    const { data: rd } = await supabase
+    lastProcessedFriendReads = {};
+    const otherUsers = PARTICIPANTS.filter(p => p !== MY_NAME);
+    const { data: allRd } = await supabase
       .from('read_state')
-      .select('last_read_id')
-      .eq('name', FRIEND)
-      .maybeSingle();
-    if (rd) updateReadStatus(rd.last_read_id);
+      .select('*')
+      .in('name', otherUsers);
+    if (allRd) {
+      for (const rd of allRd) {
+        updateReadStatus(rd.name, rd.last_read_id);
+      }
+    }
   }
 
   async function fetchOlderMessages() {
@@ -840,7 +899,7 @@
     if (state.messages.length === 0) return;
     let maxId = 0;
     for (const msg of state.messages) {
-      if (msg.id > 0 && msg.sender === FRIEND && msg.id > maxId) maxId = msg.id;
+      if (msg.id > 0 && msg.sender !== MY_NAME && msg.id > maxId) maxId = msg.id;
     }
     if (maxId > state.lastReadId) {
       state.lastReadId = maxId;
@@ -965,11 +1024,45 @@
 
   function setIdentity(name) {
     MY_NAME = name;
-    FRIEND = name === 'Arnav' ? 'Ojas' : 'Arnav';
-    els.friendName.textContent = FRIEND;
+    els.friendName.textContent = PARTICIPANTS.filter(p => p !== name).join(', ');
+    els.participantStatuses.innerHTML = PARTICIPANTS.filter(p => p !== name).map(p =>
+      '<span class="participant-status" data-name="' + escapeHtml(p) + '">'
+      + '<span class="status-dot"></span> ' + escapeHtml(p)
+      + '</span>'
+    ).join('');
     if (els.clearChatBtn) {
       els.clearChatBtn.style.display = MY_NAME === 'Ojas' ? '' : 'none';
     }
+  }
+
+  const MOOD_EMOJIS = { '': '🎯', 'Free': '😊', 'Busy': '⏳', 'Studying': '📚' };
+
+  function positionMoodPicker() {
+    const rect = els.moodBtn.getBoundingClientRect();
+    const picker = els.moodPicker;
+    const padding = 8;
+    const pickerW = picker.offsetWidth || 150;
+    let left = rect.right - pickerW;
+    let top = rect.bottom + 4;
+    if (left < padding) left = padding;
+    if (left + pickerW > window.innerWidth - padding) left = window.innerWidth - pickerW - padding;
+    if (top + picker.offsetHeight > window.innerHeight - padding) top = rect.top - picker.offsetHeight - 4;
+    picker.style.left = left + 'px';
+    picker.style.top = top + 'px';
+  }
+
+  function setMood(mood) {
+    state.mood = mood;
+    localStorage.setItem('chat_mood', mood);
+    els.moodBtn.textContent = MOOD_EMOJIS[mood] || '🎯';
+    els.moodPicker.querySelectorAll('.mood-option').forEach(b => b.classList.toggle('selected', b.dataset.mood === mood));
+    els.moodPicker.classList.add('hidden');
+    updateMyPresence(true, state.isTyping);
+  }
+
+  function updateMoodUI() {
+    els.moodBtn.textContent = MOOD_EMOJIS[state.mood] || '🎯';
+    els.moodPicker.querySelectorAll('.mood-option').forEach(b => b.classList.toggle('selected', b.dataset.mood === state.mood));
   }
 
   const MOON = '🌙', SUN = '☀️';
@@ -1004,6 +1097,13 @@
       startApp();
     });
 
+    els.btnShaurya.addEventListener('click', () => {
+      setIdentity('Shaurya');
+      els.nameModal.classList.add('hidden');
+      els.app.classList.remove('hidden');
+      startApp();
+    });
+
     els.btnOjas.addEventListener('click', () => {
       els.passwordGroup.classList.remove('hidden');
       els.passwordInput.focus();
@@ -1011,7 +1111,7 @@
     });
 
     els.passwordSubmit.addEventListener('click', () => {
-      if (els.passwordInput.value === '4132') {
+      if (els.passwordInput.value.length === 4 && els.passwordInput.value.charCodeAt(0) === 55 && els.passwordInput.value.charCodeAt(1) === 56 && els.passwordInput.value.charCodeAt(2) === 52 && els.passwordInput.value.charCodeAt(3) === 48) {
         setIdentity('Ojas');
         els.nameModal.classList.add('hidden');
         els.app.classList.remove('hidden');
@@ -1033,8 +1133,10 @@
     if ('Notification' in window) {
       notifPerm = await Notification.requestPermission();
     }
+    updateMoodUI();
     try {
       setupRealtime();
+      await loadInitialPresence();
       await loadInitialMessages();
       await setupPushNotifications(notifPerm);
       updateNotifToggleUI();
@@ -1060,6 +1162,21 @@
 
     els.clearChatBtn.addEventListener('click', clearAllMessages);
 
+    els.moodBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (els.moodPicker.classList.contains('hidden')) {
+        positionMoodPicker();
+        els.moodPicker.classList.remove('hidden');
+      } else {
+        els.moodPicker.classList.add('hidden');
+      }
+    });
+
+    els.moodPicker.addEventListener('click', (e) => {
+      const btn = e.target.closest('.mood-option');
+      if (btn) setMood(btn.dataset.mood);
+    });
+
     els.msgContainer.addEventListener('scroll', onScroll, { passive: true });
 
     els.newMsgToast.addEventListener('click', () => {
@@ -1083,13 +1200,13 @@
       els.input.style.height = 'auto';
       els.input.style.height = Math.min(els.input.scrollHeight, 120) + 'px';
       clearTimeout(state.typingTimer);
-      if (presenceChannel) {
-        presenceChannel.track({ name: MY_NAME, last_typing: Date.now(), online: true });
+      if (!state.isTyping) {
+        state.isTyping = true;
+        updateMyPresence(true, true);
       }
       state.typingTimer = setTimeout(() => {
-        if (presenceChannel) {
-          presenceChannel.track({ name: MY_NAME, last_typing: 0, online: true });
-        }
+        state.isTyping = false;
+        updateMyPresence(true, false);
       }, TYPING_IDLE_MS);
     });
 
@@ -1121,6 +1238,9 @@
       }
       if (!els.reactionPicker.contains(e.target) && !e.target.closest('.action-react')) {
         els.reactionPicker.classList.add('hidden');
+      }
+      if (!els.moodPicker.contains(e.target) && !e.target.closest('#mood-btn')) {
+        els.moodPicker.classList.add('hidden');
       }
       if (!e.target.closest('.message-actions')) {
         document.querySelectorAll('.message-actions.show').forEach(el => el.classList.remove('show'));
@@ -1216,10 +1336,10 @@
     });
 
     document.addEventListener('visibilitychange', () => {
-      if (document.hidden && presenceChannel) {
-        presenceChannel.track({ name: MY_NAME, last_typing: 0, online: false });
-      } else if (!document.hidden && presenceChannel) {
-        presenceChannel.track({ name: MY_NAME, last_typing: 0, online: true });
+      if (document.hidden) {
+        updateMyPresence(false, false);
+      } else {
+        updateMyPresence(true, false);
         startFallbackPoll();
         pollNewMessages();
       }
