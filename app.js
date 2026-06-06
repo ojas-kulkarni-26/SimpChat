@@ -20,6 +20,7 @@
   let state = {
     messages: [],
     msgMap: new Map(),
+    seenIds: new Set(),
     lastKnownId: 0,
     replyTo: null,
     editId: null,
@@ -334,9 +335,10 @@
       new Notification(msg.sender, {
         body: body.substring(0, 200),
         icon: 'icon.svg',
-        tag: 'simpchat-message-' + msg.sender,
       });
-    } catch (e) {}
+    } catch (e) {
+      console.error('Browser notification error:', e);
+    }
   }
 
   async function updateMyPresence(online, isTyping) {
@@ -395,7 +397,8 @@
       .channel('messages-insert')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, (payload) => {
         const msg = payload.new;
-        if (msg.sender !== MY_NAME && msg.id > state.lastKnownId) {
+        if (msg.sender !== MY_NAME && !state.seenIds.has(msg.id)) {
+          state.seenIds.add(msg.id);
           msg.reactions = typeof msg.reactions === 'string' ? msg.reactions : JSON.stringify(msg.reactions);
           state.messages.push(msg);
           state.msgMap.set(msg.id, msg);
@@ -478,6 +481,7 @@
 
   async function pollNewMessages() {
     if (!MY_NAME) return;
+    if (!navigator.onLine) return;
     try {
       const { data, error } = await supabase
         .from('messages')
@@ -488,6 +492,8 @@
       if (error) throw error;
       if (data && data.length > 0) {
         for (const row of data) {
+          if (state.seenIds.has(row.id)) continue;
+          state.seenIds.add(row.id);
           row.read = false;
           row._optimistic = false;
           row.reactions = typeof row.reactions === 'string' ? row.reactions : JSON.stringify(row.reactions);
@@ -505,7 +511,7 @@
 
   function startFallbackPoll() {
     stopFallbackPoll();
-    state.pollTimer = setInterval(pollNewMessages, 15000);
+    state.pollTimer = setInterval(pollNewMessages, 60000);
   }
 
   function stopFallbackPoll() {
@@ -526,6 +532,7 @@
       row.reactions = typeof row.reactions === 'string' ? row.reactions : JSON.stringify(row.reactions);
       state.messages.push(row);
       state.msgMap.set(row.id, row);
+      state.seenIds.add(row.id);
       if (row.id > state.lastKnownId && row.sender !== MY_NAME) state.lastKnownId = row.id;
     });
     batchRender(rows);
@@ -825,20 +832,26 @@
     return Uint8Array.from([].map.call(rawData, function (ch) { return ch.charCodeAt(0); }));
   }
 
-  async function setupPushNotifications(preGranted) {
-    console.log('Push: setup starting state:', { serviceWorker: 'serviceWorker' in navigator, PushManager: 'PushManager' in window, Notification: 'Notification' in window, vapid: CONFIG.VAPID_PUBLIC_KEY && CONFIG.VAPID_PUBLIC_KEY !== 'REPLACE_ME', enabled: state.notificationsEnabled, permission: Notification.permission, preGranted: preGranted });
+  async function setupPushNotifications() {
     if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
-    if (!CONFIG.VAPID_PUBLIC_KEY || CONFIG.VAPID_PUBLIC_KEY === 'REPLACE_ME') {
-      console.warn('Push: VAPID_PUBLIC_KEY not set in config.js');
+    if (!CONFIG.VAPID_PUBLIC_KEY || CONFIG.VAPID_PUBLIC_KEY === 'REPLACE_ME') return;
+    if (!state.notificationsEnabled) return;
+    if (Notification.permission === 'denied') {
+      showNotification('Notifications blocked. Allow them in your browser site settings (lock icon), then reload.');
       return;
     }
-    if (!state.notificationsEnabled) return;
-    if (preGranted !== 'granted' && Notification.permission !== 'granted') {
-      console.warn('Push: notification permission ' + (Notification.permission) + '. Allow in browser site settings (lock icon), then reload.');
-      return;
+    if (Notification.permission === 'default') {
+      let perm;
+      try {
+        perm = await Notification.requestPermission();
+      } catch (e) {
+        console.error('Permission request error:', e);
+        return;
+      }
+      if (perm !== 'granted') return;
     }
     try {
-      const swUrl = 'sw.js?url=' + encodeURIComponent(CONFIG.SUPABASE_URL) + '&key=' + encodeURIComponent(CONFIG.SUPABASE_ANON_KEY);
+      const swUrl = 'sw.js?url=' + encodeURIComponent(CONFIG.SUPABASE_URL) + '&key=' + encodeURIComponent(CONFIG.SUPABASE_ANON_KEY) + '&vapid=' + encodeURIComponent(CONFIG.VAPID_PUBLIC_KEY);
       const registration = await navigator.serviceWorker.register(swUrl);
       await navigator.serviceWorker.ready;
       let subscription = await registration.pushManager.getSubscription();
@@ -879,11 +892,7 @@
     localStorage.setItem('chat_notifications', String(state.notificationsEnabled));
     updateNotifToggleUI();
     if (state.notificationsEnabled) {
-      let perm = Notification.permission;
-      if (perm === 'default') {
-        perm = await Notification.requestPermission();
-      }
-      await setupPushNotifications(perm);
+      await setupPushNotifications();
     } else {
       await disablePushNotifications();
     }
@@ -1129,16 +1138,12 @@
   }
 
   async function startApp() {
-    let notifPerm = 'default';
-    if ('Notification' in window) {
-      notifPerm = await Notification.requestPermission();
-    }
     updateMoodUI();
     try {
       setupRealtime();
       await loadInitialPresence();
       await loadInitialMessages();
-      await setupPushNotifications(notifPerm);
+      await setupPushNotifications();
       updateNotifToggleUI();
     } catch (e) {
       console.error('Load messages error:', e);

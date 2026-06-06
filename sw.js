@@ -1,6 +1,8 @@
 const params = new URLSearchParams(self.location.search);
-const SUPABASE_REST = (params.get('url') || '').replace(/\/$/, '') + '/rest/v1';
+const SUPABASE_URL = (params.get('url') || '').replace(/\/$/, '');
+const SUPABASE_REST = SUPABASE_URL + '/rest/v1';
 const SUPABASE_KEY = params.get('key') || '';
+const VAPID_KEY = params.get('vapid') || '';
 
 self.addEventListener('install', () => {
   self.skipWaiting();
@@ -16,21 +18,28 @@ self.addEventListener('push', (event) => {
       let title = 'SimpChat';
       let body = '';
 
-      if (!SUPABASE_REST || !SUPABASE_KEY) {
-        await self.registration.showNotification(title, { body: 'New message', icon: 'icon.svg', tag: 'simpchat-push' });
-        return;
-      }
-
-      try {
-        const res = await fetch(SUPABASE_REST + '/messages?select=sender,content,msg_type&order=id.desc&limit=1', {
-          headers: { apikey: SUPABASE_KEY },
-        });
-        const msgs = await res.json();
-        if (msgs && msgs.length > 0) {
-          title = msgs[0].sender || 'SimpChat';
-          body = msgs[0].msg_type === 'image' ? '📷 Image' : (msgs[0].content || '').substring(0, 200);
+      if (event.data) {
+        try {
+          const data = event.data.json();
+          title = data.sender || 'SimpChat';
+          body = data.msg_type === 'image' ? '📷 Image' : (data.content || '').substring(0, 200);
+        } catch (e) {
+          body = 'New message';
         }
-      } catch (e) {
+      } else if (SUPABASE_REST && SUPABASE_KEY) {
+        try {
+          const res = await fetch(SUPABASE_REST + '/messages?select=sender,content,msg_type&order=id.desc&limit=1', {
+            headers: { apikey: SUPABASE_KEY },
+          });
+          const msgs = await res.json();
+          if (msgs && msgs.length > 0) {
+            title = msgs[0].sender || 'SimpChat';
+            body = msgs[0].msg_type === 'image' ? '📷 Image' : (msgs[0].content || '').substring(0, 200);
+          }
+        } catch (e) {
+          body = 'New message';
+        }
+      } else {
         body = 'New message';
       }
 
@@ -40,17 +49,39 @@ self.addEventListener('push', (event) => {
         body,
         icon: 'icon.svg',
         badge: 'icon.svg',
-        tag: 'simpchat-push',
-        data: { url: '' },
+        data: { url: swScope },
         vibrate: [200, 100, 200],
       });
     })()
   );
 });
 
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(
+    (async () => {
+      if (!SUPABASE_REST || !SUPABASE_KEY || !VAPID_KEY) return;
+      try {
+        const sub = await self.registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: VAPID_KEY,
+        });
+        await fetch(SUPABASE_REST + '/push_subscriptions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: SUPABASE_KEY, Prefer: 'resolution=merge-duplicates' },
+          body: JSON.stringify({ name: 'unknown', subscription: sub.toJSON() }),
+        });
+      } catch (e) {
+        console.error('pushsubscriptionchange error:', e);
+      }
+    })()
+  );
+});
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
-  const swScope = self.location.origin + self.location.pathname.replace(/\/[^/]*$/, '/');
+  const url = event.notification.data && event.notification.data.url
+    ? event.notification.data.url
+    : self.location.origin + self.location.pathname.replace(/\/[^/]*$/, '/');
 
   event.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
@@ -60,7 +91,7 @@ self.addEventListener('notificationclick', (event) => {
         }
       }
       if (clients.openWindow) {
-        return clients.openWindow(swScope);
+        return clients.openWindow(url);
       }
     })
   );

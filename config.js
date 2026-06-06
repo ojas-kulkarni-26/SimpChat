@@ -4,9 +4,3 @@ const CONFIG = {
   // Generate with: npx web-push generate-vapid-keys
   VAPID_PUBLIC_KEY: 'BEuppITfdey5Oaix5aAB1jDCuWZL5m6UChFIXtcwEnRouLtsHbGbo8-OwIf51Ep7ryqrTmwfDs4dABXnqWp2LgE'
 };
-
-// Public Key:
-// BEuppITfdey5Oaix5aAB1jDCuWZL5m6UChFIXtcwEnRouLtsHbGbo8-OwIf51Ep7ryqrTmwfDs4dABXnqWp2LgE
-
-// Private Key:
-// tLtKnVJlJBp-Y_pQJLe6ld11ynLa_ynUeWUVwNjF-cg

@@ -32,6 +32,8 @@
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
   );
 
+  CREATE INDEX IF NOT EXISTS idx_push_subscriptions_updated ON push_subscriptions (updated_at);
+
   -- Enable replication for realtime subscriptions
   DO $$
   BEGIN
