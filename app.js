@@ -347,6 +347,7 @@
   }
 
   let presenceHeartbeatTimer = null;
+  let presencePollTimer = null;
 
   function startPresenceHeartbeat() {
     stopPresenceHeartbeat();
@@ -359,6 +360,18 @@
     if (presenceHeartbeatTimer) {
       clearInterval(presenceHeartbeatTimer);
       presenceHeartbeatTimer = null;
+    }
+  }
+
+  function startPresencePoll() {
+    stopPresencePoll();
+    presencePollTimer = setInterval(pollPresence, 15000);
+  }
+
+  function stopPresencePoll() {
+    if (presencePollTimer) {
+      clearInterval(presencePollTimer);
+      presencePollTimer = null;
     }
   }
 
@@ -407,6 +420,35 @@
 
   const typingUsers = new Set();
 
+  async function pollPresence() {
+    if (!MY_NAME) return;
+    try {
+      const { data } = await supabase
+        .from('presence')
+        .select('name, is_online, is_typing, mood, last_seen')
+        .in('name', PARTICIPANTS.filter(p => p !== MY_NAME));
+      if (data) {
+        const now = Date.now();
+        const onlineNames = data.filter(r => {
+          if (r.is_online) return true;
+          if (r.last_seen) {
+            const diff = now - new Date(r.last_seen).getTime();
+            return diff < 120000;
+          }
+          return false;
+        }).map(r => r.name);
+        updateStatus(onlineNames);
+        typingUsers.clear();
+        data.filter(r => r.is_typing).forEach(r => typingUsers.add(r.name));
+        if (typingUsers.size > 0) showTyping([...typingUsers][0]);
+        else hideTyping();
+        data.forEach(r => updateParticipantMood(r.name, r.mood || ''));
+      }
+    } catch (e) {
+      console.error('Presence poll error:', e);
+    }
+  }
+
   function setupRealtime() {
     supabase
       .channel('presence-changes')
@@ -424,7 +466,10 @@
         else hideTyping();
         updateParticipantMood(r.name, r.mood || '');
       })
-      .subscribe();
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') console.log('Presence realtime connected');
+        else if (status === 'CHANNEL_ERROR') console.error('Presence realtime error');
+      });
 
     supabase
       .channel('messages-insert')
@@ -1212,6 +1257,7 @@
     }
     startFallbackPoll();
     startPresenceHeartbeat();
+    startPresencePoll();
     state.ready = true;
   }
 
@@ -1444,12 +1490,14 @@
         updateMyPresence(true, false);
         startFallbackPoll();
         pollNewMessages();
+        pollPresence();
       }
     });
 
     window.addEventListener('focus', () => {
       updateMyPresence(true, false);
       pollNewMessages();
+      pollPresence();
     });
 
     window.addEventListener('blur', () => {
